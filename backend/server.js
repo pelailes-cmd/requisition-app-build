@@ -38,7 +38,13 @@ app.use(cors());
 app.use(express.json());
 
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT || 465),
+  secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : true,
+  requireTLS: true,
+  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000),
+  greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 15000),
+  socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000),
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD
@@ -46,7 +52,11 @@ const transporter = nodemailer.createTransport({
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, database: usePostgres ? "postgres" : "sqlite" });
+  res.json({
+    ok: true,
+    database: usePostgres ? "postgres" : "sqlite",
+    emailConfigured: Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)
+  });
 });
 
 app.get("/accounts", async (req, res) => {
@@ -264,9 +274,14 @@ app.post("/otp/request", async (req, res) => {
 
     return res.json({ ok: true, expiresInMinutes: otpExpiresMinutes });
   } catch (error) {
-    console.error("Failed to send OTP email:", error);
+    console.error("Failed to send OTP email:", {
+      code: error?.code,
+      command: error?.command,
+      responseCode: error?.responseCode,
+      message: error?.message
+    });
     pendingCodes.delete(key);
-    return res.status(502).json({ error: "Could not send email through Gmail SMTP." });
+    return res.status(502).json({ error: getMailErrorMessage(error) });
   }
 });
 
@@ -978,6 +993,21 @@ function getCodeKey(email, role, managerUsername) {
 
 function normalizeEmail(value) {
   return cleanText(value).toLowerCase();
+}
+
+function getMailErrorMessage(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const responseCode = Number(error?.responseCode || 0);
+
+  if (code === "EAUTH" || responseCode === 534 || responseCode === 535) {
+    return "Gmail rejected the login. Check GMAIL_USER and GMAIL_APP_PASSWORD on the backend.";
+  }
+
+  if (code === "ETIMEDOUT" || code === "ESOCKET" || code === "ECONNECTION") {
+    return "The backend could not reach Gmail SMTP. Check the Gmail SMTP settings and try again.";
+  }
+
+  return "Could not send email through Gmail SMTP.";
 }
 
 function cleanText(value) {

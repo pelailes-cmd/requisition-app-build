@@ -1748,22 +1748,15 @@ async function exportPdfToDownloads({ html, fileName, successTitle, successMessa
     const { uri } = await Print.printToFileAsync({ html, base64: false });
 
     if (Platform.OS === "android") {
-      const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync(
-        FileSystem.StorageAccessFramework.getUriForDirectoryInRoot("Download")
-      );
+      const permissions = await requestAndroidExportDirectoryAccess();
 
       if (!permissions.granted) {
-        Alert.alert("Export cancelled", "Allow access to your Download folder to save the PDF there.");
+        Alert.alert("Export cancelled", "Allow access to a folder to save the PDF there.");
         return;
       }
 
-      const destinationUri = await FileSystem.StorageAccessFramework.createFileAsync(
-        permissions.directoryUri,
-        fileName.replace(/\.pdf$/i, ""),
-        "application/pdf"
-      );
-      await FileSystem.copyAsync({ from: uri, to: destinationUri });
-      Alert.alert(successTitle, `${successMessage}\n\nSaved to your selected Download folder.`);
+      await writePdfToSafDirectory(uri, permissions.directoryUri, fileName);
+      Alert.alert(successTitle, `${successMessage}\n\nSaved to your selected folder.`);
       return;
     }
 
@@ -1771,8 +1764,41 @@ async function exportPdfToDownloads({ html, fileName, successTitle, successMessa
     await FileSystem.copyAsync({ from: uri, to: documentsUri });
     Alert.alert(successTitle, `${successMessage}\n\nSaved to app documents as ${fileName}.`);
   } catch (error) {
-    Alert.alert("Export failed", "The requisition PDF could not be saved. Please try again.");
+    Alert.alert("Export failed", error?.message || "The requisition PDF could not be saved. Please try again.");
   }
+}
+
+async function requestAndroidExportDirectoryAccess() {
+  const downloadUri = FileSystem.StorageAccessFramework.getUriForDirectoryInRoot("Download");
+
+  try {
+    const preferredDirectory = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync(downloadUri);
+
+    if (preferredDirectory.granted) {
+      return preferredDirectory;
+    }
+  } catch (error) {
+    console.log("Could not open the Download folder directly", error);
+  }
+
+  return await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+}
+
+async function writePdfToSafDirectory(sourceUri, directoryUri, fileName) {
+  const destinationUri = await FileSystem.StorageAccessFramework.createFileAsync(
+    directoryUri,
+    fileName.replace(/\.pdf$/i, ""),
+    "application/pdf"
+  );
+  const pdfBase64 = await FileSystem.readAsStringAsync(sourceUri, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  await FileSystem.StorageAccessFramework.writeAsStringAsync(destinationUri, pdfBase64, {
+    encoding: FileSystem.EncodingType.Base64
+  });
+
+  return destinationUri;
 }
 
 function buildRequisitionPdfHtml(item) {
