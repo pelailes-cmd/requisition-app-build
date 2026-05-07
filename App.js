@@ -109,7 +109,7 @@ const EMPTY_FORM = {
 };
 
 const MANAGER_EMAIL = "afhinzz.ailes@gmail.com";
-const OTP_API_URL = process.env.EXPO_PUBLIC_API_URL || "http://192.168.1.8:4000";
+const OTP_API_URL = process.env.EXPO_PUBLIC_API_URL || "https://requisition-app-api.onrender.com";
 
 const INITIAL_ACCOUNTS = [
   {

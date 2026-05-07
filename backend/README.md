@@ -28,7 +28,7 @@ Local development uses SQLite automatically. Render deployment uses PostgreSQL w
    npm start
    ```
 
-The Expo app expects this backend at `http://192.168.1.9:4000`.
+The Expo app expects this backend at `https://requisition-app-api.onrender.com`.
 
 The database is created automatically at `backend/data/requisition.sqlite`. If accounts are empty, the default manager account is seeded:
 
@@ -58,6 +58,6 @@ GMAIL_APP_PASSWORD=your-16-character-google-app-password
 Then update the Expo app to use the Render service URL:
 
 ```powershell
-$env:EXPO_PUBLIC_API_URL="https://your-render-service.onrender.com"
+$env:EXPO_PUBLIC_API_URL="https://requisition-app-api.onrender.com"
 npx.cmd expo start --clear
 ```
