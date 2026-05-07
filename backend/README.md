@@ -1,6 +1,6 @@
 # Requisition App Backend
 
-This backend sends one-time sign-up codes to the selected manager through Gmail SMTP and stores accounts and requisitions in a database.
+This backend sends one-time sign-up codes to the selected manager and stores accounts and requisitions in a database.
 
 Local development uses SQLite automatically. Render deployment uses PostgreSQL when `DATABASE_URL` is set.
 
@@ -15,11 +15,23 @@ Local development uses SQLite automatically. Render deployment uses PostgreSQL w
 
 2. Copy `.env.example` to `.env`.
 
-3. Fill in:
+3. Fill in one email provider:
+
+   ```text
+   RESEND_API_KEY=re_xxxxxxxxx
+   RESEND_FROM_EMAIL=Requisition App <noreply@yourdomain.com>
+   ```
+
+   Resend is the recommended provider for Render free services because it uses HTTPS instead of SMTP ports.
+
+   Optional local SMTP fallback:
 
    ```text
    GMAIL_USER=your-gmail-address@gmail.com
    GMAIL_APP_PASSWORD=your-16-character-google-app-password
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=465
+   SMTP_SECURE=true
    ```
 
 4. Start the backend:
@@ -51,9 +63,11 @@ The repo root includes `render.yaml` for Render Blueprints. It creates:
 After creating the Blueprint on Render, add these service environment variables in the Render dashboard:
 
 ```text
-GMAIL_USER=your-gmail-address@gmail.com
-GMAIL_APP_PASSWORD=your-16-character-google-app-password
+RESEND_API_KEY=re_xxxxxxxxx
+RESEND_FROM_EMAIL=Requisition App <noreply@yourdomain.com>
 ```
+
+`RESEND_FROM_EMAIL` must use a domain you verified in Resend. The default `resend.dev` domain is only for limited testing to your own email address.
 
 Then update the Expo app to use the Render service URL:
 

@@ -14,6 +14,7 @@ const procurementStatusOptions = ["Purchased", "Delivered", "On-Bidding", "For Q
 const statusOptions = [...managerStatusOptions, ...procurementStatusOptions];
 const pendingCodes = new Map();
 const usePostgres = Boolean(process.env.DATABASE_URL);
+const resendApiUrl = "https://api.resend.com/emails";
 
 let sqliteDb;
 let pgPool;
@@ -37,25 +38,28 @@ if (usePostgres) {
 app.use(cors());
 app.use(express.json());
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT || 465),
-  secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : true,
-  requireTLS: true,
-  connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000),
-  greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 15000),
-  socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000),
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD
-  }
-});
+const transporter = hasSmtpConfig()
+  ? nodemailer.createTransport({
+      host: process.env.SMTP_HOST || "smtp.gmail.com",
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : true,
+      requireTLS: true,
+      connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 15000),
+      greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 15000),
+      socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 20000),
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD
+      }
+    })
+  : null;
 
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     database: usePostgres ? "postgres" : "sqlite",
-    emailConfigured: Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)
+    emailConfigured: Boolean(getEmailProvider()),
+    emailProvider: getEmailProvider()
   });
 });
 
@@ -242,8 +246,8 @@ app.post("/otp/request", async (req, res) => {
     return res.status(400).json({ error: "Missing email, role, or manager information." });
   }
 
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    return res.status(500).json({ error: "Gmail SMTP is not configured on the backend." });
+  if (!getEmailProvider()) {
+    return res.status(500).json({ error: "No email provider is configured on the backend." });
   }
 
   const code = generateCode();
@@ -257,24 +261,19 @@ app.post("/otp/request", async (req, res) => {
   });
 
   try {
-    await transporter.sendMail({
-      from: `"Requisition App" <${process.env.GMAIL_USER}>`,
-      to: managerEmail,
-      subject: "One-time sign-up code",
-      text: [
-        `Hello ${managerName},`,
-        "",
-        `A user is requesting a ${role} account for the requisition app.`,
-        `Applicant email: ${email}`,
-        `One-time code: ${code}`,
-        "",
-        `This code expires in ${otpExpiresMinutes} minutes.`
-      ].join("\n")
+    await sendOtpEmail({
+      applicantEmail: email,
+      code,
+      managerEmail,
+      managerName,
+      role
     });
 
     return res.json({ ok: true, expiresInMinutes: otpExpiresMinutes });
   } catch (error) {
     console.error("Failed to send OTP email:", {
+      provider: error?.provider,
+      status: error?.status,
       code: error?.code,
       command: error?.command,
       responseCode: error?.responseCode,
@@ -991,11 +990,100 @@ function getCodeKey(email, role, managerUsername) {
   return `${email}:${role}:${managerUsername}`;
 }
 
+function getEmailProvider() {
+  if (hasResendConfig()) {
+    return "resend";
+  }
+
+  if (hasSmtpConfig()) {
+    return "smtp";
+  }
+
+  return null;
+}
+
+function hasResendConfig() {
+  return Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL);
+}
+
+function hasSmtpConfig() {
+  return Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
+}
+
+async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, role }) {
+  const messageText = [
+    `Hello ${managerName},`,
+    "",
+    `A user is requesting a ${role} account for the requisition app.`,
+    `Applicant email: ${applicantEmail}`,
+    `One-time code: ${code}`,
+    "",
+    `This code expires in ${otpExpiresMinutes} minutes.`
+  ].join("\n");
+
+  if (hasResendConfig()) {
+    return await sendOtpEmailWithResend({
+      managerEmail,
+      messageText
+    });
+  }
+
+  if (hasSmtpConfig() && transporter) {
+    return await transporter.sendMail({
+      from: `"Requisition App" <${process.env.GMAIL_USER}>`,
+      to: managerEmail,
+      subject: "One-time sign-up code",
+      text: messageText
+    });
+  }
+
+  throw new Error("No email provider is configured.");
+}
+
+async function sendOtpEmailWithResend({ managerEmail, messageText }) {
+  const response = await fetch(resendApiUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: [managerEmail],
+      subject: "One-time sign-up code",
+      text: messageText
+    })
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    const error = new Error(`Resend API request failed with status ${response.status}. ${bodyText}`);
+    error.provider = "resend";
+    error.status = response.status;
+    error.responseText = bodyText;
+    throw error;
+  }
+
+  return await response.json();
+}
+
 function normalizeEmail(value) {
   return cleanText(value).toLowerCase();
 }
 
 function getMailErrorMessage(error) {
+  if (error?.provider === "resend") {
+    if (error.status === 401) {
+      return "Resend rejected the API key. Check RESEND_API_KEY on the backend.";
+    }
+
+    if (error.status === 403) {
+      return "Resend rejected the sender. Verify RESEND_FROM_EMAIL uses a verified Resend domain.";
+    }
+
+    return "The backend could not send the email through Resend. Check the Resend configuration and logs.";
+  }
+
   const code = String(error?.code || "").toUpperCase();
   const responseCode = Number(error?.responseCode || 0);
 
