@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: requisition-app-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 24.15.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: requisition-app-db
+          property: connectionString
+      - key: OTP_EXPIRES_MINUTES
+        value: 10
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+
+databases:
+  - name: requisition-app-db
+    plan: free
