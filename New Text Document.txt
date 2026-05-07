@@ -1,4 +1,0 @@
-PORT=4000
-GMAIL_USER=afhinzz.ailes@gmail.com
-GMAIL_APP_PASSWORD=glsozfwsgqeviycr
-OTP_EXPIRES_MINUTES=10
