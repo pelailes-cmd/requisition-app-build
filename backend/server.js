@@ -15,6 +15,7 @@ const statusOptions = [...managerStatusOptions, ...procurementStatusOptions];
 const pendingCodes = new Map();
 const usePostgres = Boolean(process.env.DATABASE_URL);
 const resendApiUrl = "https://api.resend.com/emails";
+const mailRelayTimeoutMs = Number(process.env.MAIL_RELAY_TIMEOUT_MS || 15000);
 
 let sqliteDb;
 let pgPool;
@@ -991,6 +992,10 @@ function getCodeKey(email, role, managerUsername) {
 }
 
 function getEmailProvider() {
+  if (hasMailRelayConfig()) {
+    return "mail-relay";
+  }
+
   if (hasResendConfig()) {
     return "resend";
   }
@@ -1000,6 +1005,10 @@ function getEmailProvider() {
   }
 
   return null;
+}
+
+function hasMailRelayConfig() {
+  return Boolean(process.env.MAIL_RELAY_URL && process.env.MAIL_RELAY_SECRET);
 }
 
 function hasResendConfig() {
@@ -1021,6 +1030,13 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
     `This code expires in ${otpExpiresMinutes} minutes.`
   ].join("\n");
 
+  if (hasMailRelayConfig()) {
+    return await sendOtpEmailWithMailRelay({
+      managerEmail,
+      messageText
+    });
+  }
+
   if (hasResendConfig()) {
     return await sendOtpEmailWithResend({
       managerEmail,
@@ -1038,6 +1054,62 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
   }
 
   throw new Error("No email provider is configured.");
+}
+
+async function sendOtpEmailWithMailRelay({ managerEmail, messageText }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), mailRelayTimeoutMs);
+
+  try {
+    const response = await fetch(process.env.MAIL_RELAY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        secret: process.env.MAIL_RELAY_SECRET,
+        to: managerEmail,
+        subject: "One-time sign-up code",
+        text: messageText
+      }),
+      signal: controller.signal
+    });
+
+    const bodyText = await response.text();
+
+    let responseBody = null;
+
+    try {
+      responseBody = bodyText ? JSON.parse(bodyText) : null;
+    } catch (parseError) {
+      responseBody = null;
+    }
+
+    if (!response.ok || responseBody?.ok === false) {
+      const error = new Error(`Mail relay request failed with status ${response.status}. ${bodyText}`);
+      error.provider = "mail-relay";
+      error.status = responseBody?.statusCode || response.status;
+      error.responseText = bodyText;
+      throw error;
+    }
+
+    return responseBody || { ok: true };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("Mail relay request timed out.");
+      timeoutError.provider = "mail-relay";
+      timeoutError.code = "ETIMEDOUT";
+      throw timeoutError;
+    }
+
+    if (!error.provider) {
+      error.provider = "mail-relay";
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function sendOtpEmailWithResend({ managerEmail, messageText }) {
@@ -1072,6 +1144,18 @@ function normalizeEmail(value) {
 }
 
 function getMailErrorMessage(error) {
+  if (error?.provider === "mail-relay") {
+    if (error.status === 401 || error.status === 403) {
+      return "The mail relay rejected the request. Check MAIL_RELAY_SECRET on the backend and Apps Script.";
+    }
+
+    if (error.code === "ETIMEDOUT") {
+      return "The mail relay did not respond in time. Check the Google Apps Script deployment.";
+    }
+
+    return "The backend could not send the email through the mail relay. Check the Google Apps Script logs.";
+  }
+
   if (error?.provider === "resend") {
     if (error.status === 401) {
       return "Resend rejected the API key. Check RESEND_API_KEY on the backend.";

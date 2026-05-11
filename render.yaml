@@ -15,9 +15,9 @@ services:
           property: connectionString
       - key: OTP_EXPIRES_MINUTES
         value: 10
-      - key: RESEND_API_KEY
+      - key: MAIL_RELAY_URL
         sync: false
-      - key: RESEND_FROM_EMAIL
+      - key: MAIL_RELAY_SECRET
         sync: false
 
 databases:

@@ -15,14 +15,21 @@ Local development uses SQLite automatically. Render deployment uses PostgreSQL w
 
 2. Copy `.env.example` to `.env`.
 
-3. Fill in one email provider:
+3. Fill in the Google Apps Script mail relay values:
+
+   ```text
+   MAIL_RELAY_URL=https://script.google.com/macros/s/your-deployment-id/exec
+   MAIL_RELAY_SECRET=use-a-long-random-secret-here
+   ```
+
+   The relay is recommended for Render free services when you do not have a verified sending domain. It uses HTTPS, so it avoids Render's blocked SMTP ports.
+
+   Optional Resend fallback if you later verify a domain:
 
    ```text
    RESEND_API_KEY=re_xxxxxxxxx
    RESEND_FROM_EMAIL=Requisition App <noreply@yourdomain.com>
    ```
-
-   Resend is the recommended provider for Render free services because it uses HTTPS instead of SMTP ports.
 
    Optional local SMTP fallback:
 
@@ -52,6 +59,16 @@ role: Manager
 
 If requisitions are empty, the demo requisitions are seeded once. New requests, edits, status changes, and deletes are stored in the same database so multiple devices using the backend see the same data.
 
+## Google Apps Script Mail Relay
+
+1. Open https://script.google.com and create a new project.
+2. Paste the contents of `backend/google-apps-script-mail-relay.js`.
+3. Set `MAIL_RELAY_SECRET` in the script to the same long random secret used in Render.
+4. Deploy it as a Web app.
+5. Set "Execute as" to your account.
+6. Set "Who has access" to anyone.
+7. Copy the Web app URL into Render as `MAIL_RELAY_URL`.
+
 ## Render + PostgreSQL
 
 The repo root includes `render.yaml` for Render Blueprints. It creates:
@@ -63,11 +80,11 @@ The repo root includes `render.yaml` for Render Blueprints. It creates:
 After creating the Blueprint on Render, add these service environment variables in the Render dashboard:
 
 ```text
-RESEND_API_KEY=re_xxxxxxxxx
-RESEND_FROM_EMAIL=Requisition App <noreply@yourdomain.com>
+MAIL_RELAY_URL=https://script.google.com/macros/s/your-deployment-id/exec
+MAIL_RELAY_SECRET=use-a-long-random-secret-here
 ```
 
-`RESEND_FROM_EMAIL` must use a domain you verified in Resend. The default `resend.dev` domain is only for limited testing to your own email address.
+`MAIL_RELAY_SECRET` must be the same value you paste into `backend/google-apps-script-mail-relay.js` before deploying it in Google Apps Script.
 
 Then update the Expo app to use the Render service URL:
 

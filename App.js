@@ -141,6 +141,8 @@ const EMPTY_SIGNUP_FORM = {
   code: ""
 };
 
+const OTP_REQUEST_COOLDOWN_SECONDS = 60;
+
 export default function App() {
   const [selectedRole, setSelectedRole] = useState("Staff");
   const [user, setUser] = useState(null);
@@ -149,6 +151,8 @@ export default function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isLoginLoading, setIsLoginLoading] = useState(false);
+  const [isOtpRequesting, setIsOtpRequesting] = useState(false);
+  const [otpCooldownSeconds, setOtpCooldownSeconds] = useState(0);
   const [signupForm, setSignupForm] = useState(EMPTY_SIGNUP_FORM);
   const [items, setItems] = useState(INITIAL_ITEMS);
   const [query, setQuery] = useState("");
@@ -180,6 +184,18 @@ export default function App() {
     loadAccounts();
     loadItems();
   }, []);
+
+  useEffect(() => {
+    if (otpCooldownSeconds <= 0) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      setOtpCooldownSeconds((current) => Math.max(current - 1, 0));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [otpCooldownSeconds]);
 
   const filteredItems = useMemo(() => {
     const filtered = items.filter((item) => {
@@ -461,6 +477,10 @@ export default function App() {
   };
 
   const requestOneTimeCode = async () => {
+    if (isOtpRequesting || otpCooldownSeconds > 0) {
+      return;
+    }
+
     const email = signupForm.email.trim().toLowerCase();
     const manager = managerAccounts.find((account) => account.username === signupForm.managerUsername);
 
@@ -473,6 +493,8 @@ export default function App() {
       Alert.alert("Manager required", "Select the manager who should receive the one-time code.");
       return;
     }
+
+    setIsOtpRequesting(true);
 
     try {
       const response = await fetch(`${OTP_API_URL}/otp/request`, {
@@ -497,8 +519,11 @@ export default function App() {
         "Code requested",
         `A one-time sign-up code was sent to ${getAccountName(manager)} at ${manager.email}.`
       );
+      setOtpCooldownSeconds(OTP_REQUEST_COOLDOWN_SECONDS);
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the OTP backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsOtpRequesting(false);
     }
   };
 
@@ -770,9 +795,19 @@ export default function App() {
                   value={signupForm.code}
                   onChangeText={(value) => updateSignupField("code", value)}
                 />
-                <HoverPressable style={styles.secondaryButton} onPress={requestOneTimeCode}>
-                  <Feather name="send" size={17} color="#111827" />
-                  <Text style={styles.secondaryButtonText}>Request</Text>
+                <HoverPressable
+                  style={styles.secondaryButton}
+                  onPress={requestOneTimeCode}
+                  disabled={isOtpRequesting || otpCooldownSeconds > 0}
+                >
+                  <Feather name={isOtpRequesting ? "loader" : "send"} size={17} color="#111827" />
+                  <Text style={styles.secondaryButtonText}>
+                    {isOtpRequesting
+                      ? "Sending..."
+                      : otpCooldownSeconds > 0
+                        ? `Resend in ${otpCooldownSeconds}s`
+                        : "Request"}
+                  </Text>
                 </HoverPressable>
               </View>
               <HoverPressable style={styles.primaryButton} onPress={signup}>
