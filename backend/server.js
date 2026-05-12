@@ -293,6 +293,106 @@ app.post("/auth/login", async (req, res) => {
   return res.json({ account });
 });
 
+app.post("/password-reset/request", async (req, res) => {
+  const username = cleanText(req.body.username).toLowerCase();
+  const role = cleanText(req.body.role);
+
+  if (!username || !role) {
+    return res.status(400).json({ error: "Username and role are required." });
+  }
+
+  const account = await getAccountByUsername(username);
+
+  if (!account || account.role !== role) {
+    return res.status(404).json({ error: "Account not found for the selected role." });
+  }
+
+  if (!getEmailProvider()) {
+    return res.status(500).json({ error: "No email provider is configured on the backend." });
+  }
+
+  const recipient = await getPasswordResetRecipient(account);
+
+  if (!recipient.email) {
+    return res.status(400).json({ error: "No manager email is available for this account." });
+  }
+
+  const code = generateCode();
+  const expiresAt = Date.now() + otpExpiresMinutes * 60 * 1000;
+  const key = getPasswordResetCodeKey(account.username, account.role);
+
+  pendingCodes.set(key, {
+    code,
+    expiresAt,
+    used: false
+  });
+
+  try {
+    await sendOtpEmail({
+      applicantEmail: account.email,
+      code,
+      managerEmail: recipient.email,
+      managerName: recipient.name,
+      role: account.role,
+      purpose: "password-reset",
+      username: account.username
+    });
+
+    return res.json({
+      ok: true,
+      expiresInMinutes: otpExpiresMinutes,
+      sentTo: recipient.isSelf ? "account" : "manager",
+      managerName: recipient.name
+    });
+  } catch (error) {
+    console.error("Failed to send password reset email:", {
+      provider: error?.provider,
+      status: error?.status,
+      code: error?.code,
+      command: error?.command,
+      responseCode: error?.responseCode,
+      message: error?.message
+    });
+    pendingCodes.delete(key);
+    return res.status(502).json({ error: getMailErrorMessage(error) });
+  }
+});
+
+app.post("/password-reset/confirm", async (req, res) => {
+  const username = cleanText(req.body.username).toLowerCase();
+  const role = cleanText(req.body.role);
+  const code = cleanText(req.body.code);
+  const password = cleanText(req.body.password);
+  const account = await getAccountByUsername(username);
+  const key = getPasswordResetCodeKey(username, role);
+  const savedCode = pendingCodes.get(key);
+
+  if (!username || !role || !code || !password) {
+    return res.status(400).json({ error: "Username, role, code, and new password are required." });
+  }
+
+  if (!account || account.role !== role) {
+    return res.status(404).json({ error: "Account not found for the selected role." });
+  }
+
+  if (!savedCode || savedCode.used) {
+    return res.status(400).json({ error: "No active password reset code was found." });
+  }
+
+  if (savedCode.expiresAt < Date.now()) {
+    pendingCodes.delete(key);
+    return res.status(400).json({ error: "The password reset code has expired." });
+  }
+
+  if (savedCode.code !== code) {
+    return res.status(400).json({ error: "The password reset code is incorrect." });
+  }
+
+  await updateAccountPassword(username, password);
+  pendingCodes.set(key, { ...savedCode, used: true });
+  return res.json({ ok: true });
+});
+
 app.post("/accounts", async (req, res) => {
   const account = {
     username: cleanText(req.body.username),
@@ -1261,6 +1361,28 @@ async function getAccountByUsername(username) {
   return account ? mapAccount(account) : null;
 }
 
+async function getPasswordResetRecipient(account) {
+  const managerUsername = cleanText(account.managerUsername).toLowerCase();
+
+  if (managerUsername) {
+    const manager = await getAccountByUsername(managerUsername);
+
+    if (manager?.email) {
+      return {
+        email: manager.email,
+        name: getAccountDisplayName(manager) || "Manager",
+        isSelf: false
+      };
+    }
+  }
+
+  return {
+    email: account.email,
+    name: getAccountDisplayName(account) || "Manager",
+    isSelf: true
+  };
+}
+
 async function createAccount(account) {
   if (usePostgres) {
     await pgPool.query(
@@ -1305,6 +1427,18 @@ async function createAccount(account) {
       account.managerUsername,
       account.role
     );
+}
+
+async function updateAccountPassword(username, password) {
+  const accountUsername = cleanText(username).toLowerCase();
+  const nextPassword = cleanText(password);
+
+  if (usePostgres) {
+    await pgPool.query("UPDATE accounts SET password = $1 WHERE lower(username) = $2", [nextPassword, accountUsername]);
+    return;
+  }
+
+  sqliteDb.prepare("UPDATE accounts SET password = ? WHERE lower(username) = ?").run(nextPassword, accountUsername);
 }
 
 async function getRequisitions(projectId = "") {
@@ -1723,6 +1857,10 @@ function getCodeKey(email, role, managerUsername) {
   return `${email}:${role}:${managerUsername}`;
 }
 
+function getPasswordResetCodeKey(username, role) {
+  return `password-reset:${cleanText(username).toLowerCase()}:${cleanText(role)}`;
+}
+
 function getEmailProvider() {
   if (hasMailRelayConfig()) {
     return "mail-relay";
@@ -1751,20 +1889,34 @@ function hasSmtpConfig() {
   return Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
 }
 
-async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, role }) {
-  const messageText = [
-    `Hello ${managerName},`,
-    "",
-    `A user is requesting a ${role} account for the requisition app.`,
-    `Applicant email: ${applicantEmail}`,
-    `One-time code: ${code}`,
-    "",
-    `This code expires in ${otpExpiresMinutes} minutes.`
-  ].join("\n");
+async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, role, purpose = "signup", username = "" }) {
+  const isPasswordReset = purpose === "password-reset";
+  const subject = isPasswordReset ? "One-time password reset code" : "One-time sign-up code";
+  const messageText = isPasswordReset
+    ? [
+        `Hello ${managerName},`,
+        "",
+        `A ${role} user is requesting a password change for the requisition app.`,
+        `Username: ${username}`,
+        `Account email: ${applicantEmail}`,
+        `One-time code: ${code}`,
+        "",
+        `This code expires in ${otpExpiresMinutes} minutes.`
+      ].join("\n")
+    : [
+        `Hello ${managerName},`,
+        "",
+        `A user is requesting a ${role} account for the requisition app.`,
+        `Applicant email: ${applicantEmail}`,
+        `One-time code: ${code}`,
+        "",
+        `This code expires in ${otpExpiresMinutes} minutes.`
+      ].join("\n");
 
   if (hasMailRelayConfig()) {
     return await sendOtpEmailWithMailRelay({
       managerEmail,
+      subject,
       messageText
     });
   }
@@ -1772,6 +1924,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
   if (hasResendConfig()) {
     return await sendOtpEmailWithResend({
       managerEmail,
+      subject,
       messageText
     });
   }
@@ -1780,7 +1933,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
     return await transporter.sendMail({
       from: `"Requisition App" <${process.env.GMAIL_USER}>`,
       to: managerEmail,
-      subject: "One-time sign-up code",
+      subject,
       text: messageText
     });
   }
@@ -1788,7 +1941,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
   throw new Error("No email provider is configured.");
 }
 
-async function sendOtpEmailWithMailRelay({ managerEmail, messageText }) {
+async function sendOtpEmailWithMailRelay({ managerEmail, subject, messageText }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), mailRelayTimeoutMs);
 
@@ -1801,7 +1954,7 @@ async function sendOtpEmailWithMailRelay({ managerEmail, messageText }) {
       body: JSON.stringify({
         secret: process.env.MAIL_RELAY_SECRET,
         to: managerEmail,
-        subject: "One-time sign-up code",
+        subject,
         text: messageText
       }),
       signal: controller.signal
@@ -1844,7 +1997,7 @@ async function sendOtpEmailWithMailRelay({ managerEmail, messageText }) {
   }
 }
 
-async function sendOtpEmailWithResend({ managerEmail, messageText }) {
+async function sendOtpEmailWithResend({ managerEmail, subject, messageText }) {
   const response = await fetch(resendApiUrl, {
     method: "POST",
     headers: {
@@ -1854,7 +2007,7 @@ async function sendOtpEmailWithResend({ managerEmail, messageText }) {
     body: JSON.stringify({
       from: process.env.RESEND_FROM_EMAIL,
       to: [managerEmail],
-      subject: "One-time sign-up code",
+      subject,
       text: messageText
     })
   });

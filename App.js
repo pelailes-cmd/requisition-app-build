@@ -173,6 +173,13 @@ const EMPTY_SIGNUP_FORM = {
   code: ""
 };
 
+const EMPTY_PASSWORD_RESET_FORM = {
+  username: "",
+  role: "Staff",
+  code: "",
+  password: ""
+};
+
 const OTP_REQUEST_COOLDOWN_SECONDS = 60;
 
 export default function App() {
@@ -182,10 +189,18 @@ export default function App() {
   const [authMode, setAuthMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [isLoginLoading, setIsLoginLoading] = useState(false);
+  const [isSignupLoading, setIsSignupLoading] = useState(false);
   const [isOtpRequesting, setIsOtpRequesting] = useState(false);
   const [otpCooldownSeconds, setOtpCooldownSeconds] = useState(0);
   const [signupForm, setSignupForm] = useState(EMPTY_SIGNUP_FORM);
+  const [passwordResetForm, setPasswordResetForm] = useState(EMPTY_PASSWORD_RESET_FORM);
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [isPasswordResetRequesting, setIsPasswordResetRequesting] = useState(false);
+  const [isPasswordResetSaving, setIsPasswordResetSaving] = useState(false);
+  const [passwordResetCooldownSeconds, setPasswordResetCooldownSeconds] = useState(0);
   const [projects, setProjects] = useState(INITIAL_PROJECTS);
   const [selectedProjectId, setSelectedProjectId] = useState("sample");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -194,8 +209,11 @@ export default function App() {
   const [projectAccessUsers, setProjectAccessUsers] = useState([]);
   const [isProjectAccessLoading, setIsProjectAccessLoading] = useState(false);
   const [isProjectAccessSaving, setIsProjectAccessSaving] = useState(false);
+  const [isProjectSaving, setIsProjectSaving] = useState(false);
   const [projectForm, setProjectForm] = useState(EMPTY_PROJECT_FORM);
   const [items, setItems] = useState(INITIAL_ITEMS);
+  const [isItemSaving, setIsItemSaving] = useState(false);
+  const [isRefreshLoading, setIsRefreshLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [sortOrder, setSortOrder] = useState("Latest");
@@ -250,6 +268,18 @@ export default function App() {
     return () => clearInterval(timer);
   }, [otpCooldownSeconds]);
 
+  useEffect(() => {
+    if (passwordResetCooldownSeconds <= 0) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      setPasswordResetCooldownSeconds((current) => Math.max(current - 1, 0));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [passwordResetCooldownSeconds]);
+
   const filteredItems = useMemo(() => {
     const filtered = items.filter((item) => {
       const searchable = `${item.item} ${item.category} ${item.requestedBy} ${item.status} ${item.procurementStatus} ${item.deliveryConfirmation} ${item.deliveryRemarks}`.toLowerCase();
@@ -271,6 +301,32 @@ export default function App() {
       return counts;
     }, {});
   }, [items]);
+
+  const loadingMessage = useMemo(() => {
+    if (isLoginLoading) return "Logging in";
+    if (isSignupLoading) return "Creating account";
+    if (isOtpRequesting) return "Sending code";
+    if (isPasswordResetRequesting) return "Sending reset code";
+    if (isPasswordResetSaving) return "Updating password";
+    if (isRefreshLoading) return "Refreshing workspace";
+    if (isItemSaving) return editingItem ? "Saving request" : "Creating request";
+    if (isProjectSaving) return "Saving project";
+    if (isProjectAccessSaving) return "Saving settings";
+    if (isProjectAccessLoading) return "Loading users";
+    return "";
+  }, [
+    isLoginLoading,
+    isSignupLoading,
+    isOtpRequesting,
+    isPasswordResetRequesting,
+    isPasswordResetSaving,
+    isRefreshLoading,
+    isItemSaving,
+    editingItem,
+    isProjectSaving,
+    isProjectAccessSaving,
+    isProjectAccessLoading
+  ]);
 
   const selectedRequisition = useMemo(() => {
     return items.find((item) => item.id === selectedRequisitionId) || null;
@@ -297,6 +353,10 @@ export default function App() {
   };
 
   const saveItem = async () => {
+    if (isItemSaving) {
+      return;
+    }
+
     if (!selectedProjectId) {
       Alert.alert("Project required", "Select an accessible project before creating a requisition.");
       return;
@@ -306,6 +366,8 @@ export default function App() {
       Alert.alert("Missing information", "Item, quantity, requested by, and charge to are required.");
       return;
     }
+
+    setIsItemSaving(true);
 
     try {
       const response = await fetch(
@@ -339,6 +401,8 @@ export default function App() {
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
       return;
+    } finally {
+      setIsItemSaving(false);
     }
 
     setEditingItem(null);
@@ -463,16 +527,24 @@ export default function App() {
       if (response.ok && Array.isArray(result.projects)) {
         setProjects(result.projects);
 
+        let nextProjectId = selectedProjectId;
+
         if (result.projects.length === 0) {
+          nextProjectId = "";
           setSelectedProjectId("");
           setItems([]);
         } else if (!result.projects.some((project) => project.id === selectedProjectId)) {
-          setSelectedProjectId(result.projects[0].id);
+          nextProjectId = result.projects[0].id;
+          setSelectedProjectId(nextProjectId);
         }
+
+        return { projects: result.projects, selectedProjectId: nextProjectId };
       }
     } catch (error) {
       console.log("Could not load backend projects", error);
     }
+
+    return null;
   };
 
   const loadItems = async (projectId = selectedProjectId) => {
@@ -505,10 +577,16 @@ export default function App() {
   };
 
   const saveProject = async () => {
+    if (isProjectSaving) {
+      return;
+    }
+
     if (!projectForm.title.trim() || !projectForm.projectCode.trim()) {
       Alert.alert("Missing project information", "Project name/title and project code are required.");
       return;
     }
+
+    setIsProjectSaving(true);
 
     try {
       const response = await fetch(`${OTP_API_URL}/projects`, {
@@ -534,6 +612,8 @@ export default function App() {
       setItems([]);
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsProjectSaving(false);
     }
   };
 
@@ -615,6 +695,28 @@ export default function App() {
     }
   };
 
+  const refreshWorkspace = async () => {
+    if (!user || isRefreshLoading) {
+      return;
+    }
+
+    setIsRefreshLoading(true);
+
+    try {
+      await loadAccounts();
+      const refreshedProjects = await loadProjects(user);
+      const nextProjectId = refreshedProjects?.selectedProjectId || selectedProjectId;
+
+      if (nextProjectId) {
+        await loadItems(nextProjectId);
+      } else {
+        setItems([]);
+      }
+    } finally {
+      setIsRefreshLoading(false);
+    }
+  };
+
   const login = async () => {
     if (isLoginLoading) {
       return;
@@ -660,6 +762,10 @@ export default function App() {
     setSelectedRole("Staff");
     setUsername("");
     setPassword("");
+    setShowLoginPassword(false);
+    setShowSignupPassword(false);
+    setShowResetPassword(false);
+    setPasswordResetForm(EMPTY_PASSWORD_RESET_FORM);
     setQuery("");
     setStatusFilter("All");
     setProjects(INITIAL_PROJECTS);
@@ -691,6 +797,10 @@ export default function App() {
 
   const updateSignupField = (field, value) => {
     setSignupForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const updatePasswordResetField = (field, value) => {
+    setPasswordResetForm((current) => ({ ...current, [field]: value }));
   };
 
   const requestOneTimeCode = async () => {
@@ -744,7 +854,101 @@ export default function App() {
     }
   };
 
+  const requestPasswordResetCode = async () => {
+    if (isPasswordResetRequesting || passwordResetCooldownSeconds > 0) {
+      return;
+    }
+
+    const resetUsername = passwordResetForm.username.trim().toLowerCase();
+
+    if (!resetUsername) {
+      Alert.alert("Username required", "Enter your username before requesting a password reset code.");
+      return;
+    }
+
+    setIsPasswordResetRequesting(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/password-reset/request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: resetUsername,
+          role: passwordResetForm.role
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Code not sent", result.error || "The backend could not send the password reset code.");
+        return;
+      }
+
+      Alert.alert(
+        "Code requested",
+        result.sentTo === "account"
+          ? "A one-time password reset code was sent to your account email."
+          : `A one-time password reset code was sent to ${result.managerName || "your manager"}.`
+      );
+      setPasswordResetCooldownSeconds(OTP_REQUEST_COOLDOWN_SECONDS);
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the OTP backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsPasswordResetRequesting(false);
+    }
+  };
+
+  const confirmPasswordReset = async () => {
+    if (isPasswordResetSaving) {
+      return;
+    }
+
+    const resetUsername = passwordResetForm.username.trim().toLowerCase();
+
+    if (!resetUsername || !passwordResetForm.code.trim() || !passwordResetForm.password.trim()) {
+      Alert.alert("Missing information", "Enter your username, reset code, and new password.");
+      return;
+    }
+
+    setIsPasswordResetSaving(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/password-reset/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: resetUsername,
+          role: passwordResetForm.role,
+          code: passwordResetForm.code.trim(),
+          password: passwordResetForm.password
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Password not changed", result.error || "The backend could not update the password.");
+        return;
+      }
+
+      setSelectedRole(passwordResetForm.role);
+      setUsername(resetUsername);
+      setPassword("");
+      setPasswordResetForm(EMPTY_PASSWORD_RESET_FORM);
+      setShowResetPassword(false);
+      setAuthMode("login");
+      Alert.alert("Password changed", "You can now log in with your new password.");
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsPasswordResetSaving(false);
+    }
+  };
+
   const signup = async () => {
+    if (isSignupLoading) {
+      return;
+    }
+
     const requiredFields = [
       "username",
       "password",
@@ -771,6 +975,8 @@ export default function App() {
       return;
     }
 
+    setIsSignupLoading(true);
+
     try {
       const response = await fetch(`${OTP_API_URL}/otp/verify`, {
         method: "POST",
@@ -786,10 +992,12 @@ export default function App() {
 
       if (!response.ok || !result.valid) {
         Alert.alert("Invalid code", result.error || "Request a one-time code from the manager and enter the latest code.");
+        setIsSignupLoading(false);
         return;
       }
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the OTP backend, then try again.\n\n${OTP_API_URL}`);
+      setIsSignupLoading(false);
       return;
     }
 
@@ -817,15 +1025,18 @@ export default function App() {
 
       if (!response.ok) {
         Alert.alert("Account not created", result.error || "The backend could not save the account.");
+        setIsSignupLoading(false);
         return;
       }
 
       setAccounts((current) => [...current, result.account]);
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+      setIsSignupLoading(false);
       return;
     }
 
+    setIsSignupLoading(false);
     setSelectedRole(newAccount.role);
     setUsername(newAccount.username);
     setPassword("");
@@ -839,11 +1050,15 @@ export default function App() {
       <AppFrame>
         <ScrollView contentContainerStyle={styles.authShell} showsVerticalScrollIndicator={false}>
           <Text style={styles.kicker}>Material and equipment requisition</Text>
-          <Text style={styles.title}>{authMode === "login" ? "Sign in" : "Create account"}</Text>
+          <Text style={styles.title}>
+            {authMode === "login" ? "Sign in" : authMode === "signup" ? "Create account" : "Reset password"}
+          </Text>
           <Text style={styles.subtitle}>
             {authMode === "login"
               ? "Only registered accounts can access the requisition workspace."
-              : "Select a registered manager, then request a one-time code before signing up."}
+              : authMode === "signup"
+                ? "Select a registered manager, then request a one-time code before signing up."
+                : "Request a one-time code from your manager, then enter your new password."}
           </Text>
 
           <View style={styles.authTabs}>
@@ -881,20 +1096,23 @@ export default function App() {
               </View>
               <TextInput
                 autoCapitalize="none"
-                placeholder="Username"
+                placeholder="Username (e.g. jdelacruz)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={username}
                 onChangeText={setUsername}
               />
-              <TextInput
+              <PasswordInput
                 placeholder="Password"
-                placeholderTextColor="#9ca3af"
-                secureTextEntry
-                style={styles.input}
                 value={password}
                 onChangeText={setPassword}
+                isVisible={showLoginPassword}
+                onToggleVisibility={() => setShowLoginPassword((current) => !current)}
               />
+              <HoverPressable style={styles.textButton} onPress={() => setAuthMode("forgot")}>
+                <Feather name="help-circle" size={16} color="#2563eb" />
+                <Text style={styles.textButtonText}>Forgot password?</Text>
+              </HoverPressable>
               <HoverPressable
                 style={[styles.primaryButton, isLoginLoading && styles.disabledButton]}
                 onPress={login}
@@ -911,6 +1129,74 @@ export default function App() {
                     <Feather name="arrow-right" size={18} color="#ffffff" />
                   </>
                 )}
+              </HoverPressable>
+            </View>
+          ) : authMode === "forgot" ? (
+            <View style={styles.loginPanel}>
+              <Text style={styles.sectionLabel}>Account role</Text>
+              <View style={styles.segmented}>
+                {ROLES.map((role) => (
+                  <HoverPressable
+                    key={role.key}
+                    style={[styles.segment, passwordResetForm.role === role.key && styles.segmentActive]}
+                    onPress={() => updatePasswordResetField("role", role.key)}
+                  >
+                    <Text style={[styles.segmentText, passwordResetForm.role === role.key && styles.segmentTextActive]}>
+                      {role.key}
+                    </Text>
+                  </HoverPressable>
+                ))}
+              </View>
+              <TextInput
+                autoCapitalize="none"
+                placeholder="Username (e.g. jdelacruz)"
+                placeholderTextColor="#9ca3af"
+                style={styles.input}
+                value={passwordResetForm.username}
+                onChangeText={(value) => updatePasswordResetField("username", value)}
+              />
+              <View style={styles.codeRow}>
+                <TextInput
+                  keyboardType="number-pad"
+                  placeholder="6-digit code from manager"
+                  placeholderTextColor="#9ca3af"
+                  style={[styles.input, styles.codeInput]}
+                  value={passwordResetForm.code}
+                  onChangeText={(value) => updatePasswordResetField("code", value)}
+                />
+                <HoverPressable
+                  style={styles.secondaryButton}
+                  onPress={requestPasswordResetCode}
+                  disabled={isPasswordResetRequesting || passwordResetCooldownSeconds > 0}
+                >
+                  <Feather name={isPasswordResetRequesting ? "loader" : "send"} size={17} color="#111827" />
+                  <Text style={styles.secondaryButtonText}>
+                    {isPasswordResetRequesting
+                      ? "Sending..."
+                      : passwordResetCooldownSeconds > 0
+                        ? `Resend in ${passwordResetCooldownSeconds}s`
+                        : "Request"}
+                  </Text>
+                </HoverPressable>
+              </View>
+              <PasswordInput
+                placeholder="New password (e.g. StrongPass2026)"
+                value={passwordResetForm.password}
+                onChangeText={(value) => updatePasswordResetField("password", value)}
+                isVisible={showResetPassword}
+                onToggleVisibility={() => setShowResetPassword((current) => !current)}
+              />
+              <HoverPressable
+                style={[styles.primaryButton, isPasswordResetSaving && styles.disabledButton]}
+                onPress={confirmPasswordReset}
+                disabled={isPasswordResetSaving}
+              >
+                <Text style={styles.primaryButtonText}>Change password</Text>
+                <Feather name="key" size={18} color="#ffffff" />
+              </HoverPressable>
+              <HoverPressable style={styles.textButton} onPress={() => setAuthMode("login")}>
+                <Feather name="arrow-left" size={16} color="#2563eb" />
+                <Text style={styles.textButtonText}>Back to sign in</Text>
               </HoverPressable>
             </View>
           ) : (
@@ -931,24 +1217,23 @@ export default function App() {
               </View>
               <TextInput
                 autoCapitalize="none"
-                placeholder="Preferred username"
+                placeholder="Preferred username (e.g. jdelacruz)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.username}
                 onChangeText={(value) => updateSignupField("username", value)}
               />
-              <TextInput
-                placeholder="Password"
-                placeholderTextColor="#9ca3af"
-                secureTextEntry
-                style={styles.input}
+              <PasswordInput
+                placeholder="Password (e.g. StrongPass2026)"
                 value={signupForm.password}
                 onChangeText={(value) => updateSignupField("password", value)}
+                isVisible={showSignupPassword}
+                onToggleVisibility={() => setShowSignupPassword((current) => !current)}
               />
               <TextInput
                 autoCapitalize="none"
                 keyboardType="email-address"
-                placeholder="Email"
+                placeholder="Email (e.g. juan.delacruz@email.com)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.email}
@@ -956,14 +1241,14 @@ export default function App() {
               />
               <View style={styles.twoColumn}>
                 <TextInput
-                  placeholder="First name"
+                  placeholder="First name (e.g. Juan)"
                   placeholderTextColor="#9ca3af"
                   style={[styles.input, styles.flexInput]}
                   value={signupForm.firstName}
                   onChangeText={(value) => updateSignupField("firstName", value)}
                 />
                 <TextInput
-                  placeholder="Middle name"
+                  placeholder="Middle name (e.g. Santos)"
                   placeholderTextColor="#9ca3af"
                   style={[styles.input, styles.flexInput]}
                   value={signupForm.middleName}
@@ -971,28 +1256,28 @@ export default function App() {
                 />
               </View>
               <TextInput
-                placeholder="Last name"
+                placeholder="Last name (e.g. Dela Cruz)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.lastName}
                 onChangeText={(value) => updateSignupField("lastName", value)}
               />
               <TextInput
-                placeholder="Department"
+                placeholder="Department (e.g. Engineering)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.department}
                 onChangeText={(value) => updateSignupField("department", value)}
               />
               <TextInput
-                placeholder="Trade"
+                placeholder="Trade (e.g. Electrical)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.trade}
                 onChangeText={(value) => updateSignupField("trade", value)}
               />
               <TextInput
-                placeholder="Head"
+                placeholder="Head (e.g. Engr. Reyes)"
                 placeholderTextColor="#9ca3af"
                 style={styles.input}
                 value={signupForm.head}
@@ -1006,7 +1291,7 @@ export default function App() {
               <View style={styles.codeRow}>
                 <TextInput
                   keyboardType="number-pad"
-                  placeholder="Requested one-time code"
+                  placeholder="6-digit code from manager"
                   placeholderTextColor="#9ca3af"
                   style={[styles.input, styles.codeInput]}
                   value={signupForm.code}
@@ -1027,13 +1312,18 @@ export default function App() {
                   </Text>
                 </HoverPressable>
               </View>
-              <HoverPressable style={styles.primaryButton} onPress={signup}>
+              <HoverPressable
+                style={[styles.primaryButton, isSignupLoading && styles.disabledButton]}
+                onPress={signup}
+                disabled={isSignupLoading}
+              >
                 <Text style={styles.primaryButtonText}>Create account</Text>
                 <Feather name="user-plus" size={18} color="#ffffff" />
               </HoverPressable>
             </View>
           )}
         </ScrollView>
+        <LoadingOverlay visible={!!loadingMessage} message={loadingMessage} />
       </AppFrame>
     );
   }
@@ -1069,6 +1359,13 @@ export default function App() {
                 }}
               />
             )}
+            <HoverPressable
+              style={[styles.headerIconButton, isRefreshLoading && styles.disabledControl]}
+              onPress={refreshWorkspace}
+              disabled={isRefreshLoading}
+            >
+              <Feather name="refresh-cw" size={18} color="#111827" />
+            </HoverPressable>
             <HoverPressable style={styles.headerIconButton} onPress={exportAllRequisitions}>
               <Feather name="download" size={18} color="#111827" />
             </HoverPressable>
@@ -1174,6 +1471,7 @@ export default function App() {
         editingItem={editingItem}
         form={form}
         setForm={setForm}
+        isSaving={isItemSaving}
         onClose={() => {
           setEditingItem(null);
           setForm(EMPTY_FORM);
@@ -1186,6 +1484,7 @@ export default function App() {
         visible={isProjectFormOpen}
         form={projectForm}
         onChange={updateProjectField}
+        isSaving={isProjectSaving}
         onClose={() => {
           setProjectForm(EMPTY_PROJECT_FORM);
           setIsProjectFormOpen(false);
@@ -1210,6 +1509,7 @@ export default function App() {
         project={selectedProject}
         onClose={() => setSelectedRequisitionId(null)}
       />
+      <LoadingOverlay visible={!!loadingMessage} message={loadingMessage} />
     </AppFrame>
   );
 }
@@ -1237,6 +1537,42 @@ function HoverPressable({ children, style, onPress, disabled = false }) {
     >
       {children}
     </Pressable>
+  );
+}
+
+function PasswordInput({ placeholder, value, onChangeText, isVisible, onToggleVisibility }) {
+  return (
+    <View style={styles.passwordInputWrap}>
+      <TextInput
+        autoCapitalize="none"
+        placeholder={placeholder}
+        placeholderTextColor="#9ca3af"
+        secureTextEntry={!isVisible}
+        style={styles.passwordInput}
+        value={value}
+        onChangeText={onChangeText}
+      />
+      <HoverPressable style={styles.passwordEyeButton} onPress={onToggleVisibility}>
+        <Feather name={isVisible ? "eye-off" : "eye"} size={20} color="#475569" />
+      </HoverPressable>
+    </View>
+  );
+}
+
+function LoadingOverlay({ visible, message }) {
+  if (!visible) {
+    return null;
+  }
+
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={() => {}}>
+      <View style={styles.loadingOverlay}>
+        <View style={styles.loadingCard}>
+          <ActivityIndicator size="large" color="#111827" />
+          <Text style={styles.loadingOverlayText}>{message}</Text>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -1968,7 +2304,7 @@ function ProjectSettingsModal({ visible, project, users, isLoading, isSaving, on
   );
 }
 
-function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
+function ProjectFormModal({ visible, form, onChange, isSaving, onClose, onSave }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
@@ -1985,14 +2321,14 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
 
           <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
             <TextInput
-              placeholder="Project name/title"
+              placeholder="Project name/title (e.g. South Tower Fit-out)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.title}
               onChangeText={(value) => onChange("title", value)}
             />
             <TextInput
-              placeholder="Project code"
+              placeholder="Project code (e.g. STFO-2026)"
               placeholderTextColor="#9ca3af"
               autoCapitalize="characters"
               style={styles.input}
@@ -2000,7 +2336,7 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
               onChangeText={(value) => onChange("projectCode", value)}
             />
             <TextInput
-              placeholder="Director"
+              placeholder="Director (e.g. Engr. Reyes)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.director}
@@ -2026,7 +2362,7 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
             </View>
             <TextInput
               multiline
-              placeholder="Manager/s"
+              placeholder="Manager/s (e.g. Pel Martine Ailes)"
               placeholderTextColor="#9ca3af"
               style={[styles.input, styles.textarea]}
               value={form.managers}
@@ -2034,14 +2370,14 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
             />
             <TextInput
               multiline
-              placeholder="Engineer/s"
+              placeholder="Engineer/s (e.g. Juan Dela Cruz)"
               placeholderTextColor="#9ca3af"
               style={[styles.input, styles.textarea]}
               value={form.engineers}
               onChangeText={(value) => onChange("engineers", value)}
             />
             <TextInput
-              placeholder="Project costs"
+              placeholder="Project costs (e.g. 1500000)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.projectCosts}
@@ -2049,14 +2385,14 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
             />
             <TextInput
               multiline
-              placeholder="Contractor/s"
+              placeholder="Contractor/s (e.g. ABC Builders)"
               placeholderTextColor="#9ca3af"
               style={[styles.input, styles.textarea]}
               value={form.contractors}
               onChangeText={(value) => onChange("contractors", value)}
             />
             <TextInput
-              placeholder="Location/Site"
+              placeholder="Location/Site (e.g. BGC, Taguig)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.locationSite}
@@ -2064,8 +2400,12 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
             />
           </ScrollView>
 
-          <HoverPressable style={styles.primaryButton} onPress={onSave}>
-            <Text style={styles.primaryButtonText}>Save project</Text>
+          <HoverPressable
+            style={[styles.primaryButton, isSaving && styles.disabledButton]}
+            onPress={onSave}
+            disabled={isSaving}
+          >
+            <Text style={styles.primaryButtonText}>{isSaving ? "Saving..." : "Save project"}</Text>
             <Feather name="check" size={18} color="#ffffff" />
           </HoverPressable>
         </View>
@@ -2074,7 +2414,7 @@ function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
   );
 }
 
-function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
+function ItemModal({ visible, editingItem, form, setForm, isSaving, onClose, onSave }) {
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
@@ -2091,14 +2431,14 @@ function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
 
           <ScrollView showsVerticalScrollIndicator={false}>
             <TextInput
-              placeholder="Item or equipment"
+              placeholder="Item or equipment (e.g. Safety helmets)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.item}
               onChangeText={(item) => setForm((current) => ({ ...current, item }))}
             />
             <TextInput
-              placeholder="Category"
+              placeholder="Category (e.g. PPE)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.category}
@@ -2106,7 +2446,7 @@ function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
             />
             <TextInput
               keyboardType="number-pad"
-              placeholder="Quantity"
+              placeholder="Quantity (e.g. 36)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.quantity}
@@ -2117,14 +2457,14 @@ function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
               onSelect={(neededDate) => setForm((current) => ({ ...current, neededDate }))}
             />
             <TextInput
-              placeholder="Requested by"
+              placeholder="Requested by (e.g. Site Team A)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.requestedBy}
               onChangeText={(requestedBy) => setForm((current) => ({ ...current, requestedBy }))}
             />
             <TextInput
-              placeholder="Charge to"
+              placeholder="Charge to (e.g. North Wing Project)"
               placeholderTextColor="#9ca3af"
               style={styles.input}
               value={form.chargeTo}
@@ -2145,7 +2485,7 @@ function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
             </View>
             <TextInput
               multiline
-              placeholder="Notes"
+              placeholder="Notes (e.g. For new contractors)"
               placeholderTextColor="#9ca3af"
               style={[styles.input, styles.textarea]}
               value={form.notes}
@@ -2153,8 +2493,14 @@ function ItemModal({ visible, editingItem, form, setForm, onClose, onSave }) {
             />
           </ScrollView>
 
-          <HoverPressable style={styles.primaryButton} onPress={onSave}>
-            <Text style={styles.primaryButtonText}>{editingItem ? "Save changes" : "Add request"}</Text>
+          <HoverPressable
+            style={[styles.primaryButton, isSaving && styles.disabledButton]}
+            onPress={onSave}
+            disabled={isSaving}
+          >
+            <Text style={styles.primaryButtonText}>
+              {isSaving ? "Saving..." : editingItem ? "Save changes" : "Add request"}
+            </Text>
             <Feather name="check" size={18} color="#ffffff" />
           </HoverPressable>
         </View>
@@ -2765,6 +3111,31 @@ const styles = StyleSheet.create({
     minHeight: 52,
     paddingHorizontal: 16
   },
+  passwordInputWrap: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    minHeight: 52,
+    paddingLeft: 16,
+    paddingRight: 6
+  },
+  passwordInput: {
+    color: "#111827",
+    flex: 1,
+    fontSize: 15,
+    minHeight: 50,
+    paddingRight: 8
+  },
+  passwordEyeButton: {
+    alignItems: "center",
+    borderRadius: 8,
+    height: 42,
+    justifyContent: "center",
+    width: 42
+  },
   twoColumn: {
     flexDirection: "row",
     gap: 10
@@ -3341,6 +3712,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800"
   },
+  textButton: {
+    alignItems: "center",
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    gap: 7,
+    minHeight: 38,
+    paddingHorizontal: 2
+  },
+  textButtonText: {
+    color: "#2563eb",
+    fontSize: 14,
+    fontWeight: "800"
+  },
   dangerButton: {
     alignItems: "center",
     backgroundColor: "#fff1f2",
@@ -3382,6 +3766,26 @@ const styles = StyleSheet.create({
   loadingText: {
     color: "#64748b",
     fontSize: 13,
+    fontWeight: "800"
+  },
+  loadingOverlay: {
+    alignItems: "center",
+    backgroundColor: "rgba(17, 24, 39, 0.38)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 22
+  },
+  loadingCard: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderRadius: 8,
+    gap: 12,
+    minWidth: 190,
+    padding: 22
+  },
+  loadingOverlayText: {
+    color: "#111827",
+    fontSize: 15,
     fontWeight: "800"
   },
   modalOverlay: {
