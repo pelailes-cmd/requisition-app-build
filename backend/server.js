@@ -73,8 +73,30 @@ app.get("/accounts/managers", async (req, res) => {
   res.json({ managers: accounts.filter((account) => account.role === "Manager") });
 });
 
+app.get("/projects", async (req, res) => {
+  res.json({ projects: await getProjects() });
+});
+
+app.post("/projects", async (req, res) => {
+  const project = readProjectBody(req.body);
+
+  if (!project.title || !project.projectCode) {
+    return res.status(400).json({ error: "Project title and project code are required." });
+  }
+
+  const existingProject = await getProjectByCode(project.projectCode);
+
+  if (existingProject) {
+    return res.status(409).json({ error: "Project code already exists." });
+  }
+
+  const id = await getNextProjectId();
+  await createProject(id, project);
+  return res.status(201).json({ project: await getProjectById(id) });
+});
+
 app.get("/requisitions", async (req, res) => {
-  res.json({ requisitions: await getRequisitions() });
+  res.json({ requisitions: await getRequisitions(cleanText(req.query.projectId)) });
 });
 
 app.post("/requisitions", async (req, res) => {
@@ -83,6 +105,10 @@ app.post("/requisitions", async (req, res) => {
 
   if (!requisition.item || !requisition.quantity || !requisition.requestedBy || !requisition.chargeTo) {
     return res.status(400).json({ error: "Item, quantity, requested by, and charge to are required." });
+  }
+
+  if (!(await getProjectById(requisition.projectId))) {
+    return res.status(400).json({ error: "Select a valid project before creating a requisition." });
   }
 
   const id = await getNextRequisitionId();
@@ -343,8 +369,25 @@ async function initializeDatabase() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        director TEXT NOT NULL DEFAULT '',
+        start_date TEXT NOT NULL DEFAULT '',
+        end_date TEXT NOT NULL DEFAULT '',
+        managers TEXT NOT NULL DEFAULT '',
+        engineers TEXT NOT NULL DEFAULT '',
+        project_costs TEXT NOT NULL DEFAULT '',
+        contractors TEXT NOT NULL DEFAULT '',
+        location_site TEXT NOT NULL DEFAULT '',
+        project_code TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
       CREATE TABLE IF NOT EXISTS requisitions (
         id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL DEFAULT 'sample' REFERENCES projects(id),
         item TEXT NOT NULL,
         category TEXT NOT NULL DEFAULT '',
         quantity TEXT NOT NULL,
@@ -375,6 +418,8 @@ async function initializeDatabase() {
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS procurement_status TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_confirmation TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_remarks TEXT NOT NULL DEFAULT ''");
+    await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT 'sample'");
+    await pgPool.query("CREATE INDEX IF NOT EXISTS requisitions_project_id_idx ON requisitions(project_id)");
   } else {
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
@@ -393,8 +438,25 @@ async function initializeDatabase() {
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        director TEXT NOT NULL DEFAULT '',
+        startDate TEXT NOT NULL DEFAULT '',
+        endDate TEXT NOT NULL DEFAULT '',
+        managers TEXT NOT NULL DEFAULT '',
+        engineers TEXT NOT NULL DEFAULT '',
+        projectCosts TEXT NOT NULL DEFAULT '',
+        contractors TEXT NOT NULL DEFAULT '',
+        locationSite TEXT NOT NULL DEFAULT '',
+        projectCode TEXT NOT NULL UNIQUE,
+        createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS requisitions (
         id TEXT PRIMARY KEY,
+        projectId TEXT NOT NULL DEFAULT 'sample',
         item TEXT NOT NULL,
         category TEXT NOT NULL DEFAULT '',
         quantity TEXT NOT NULL,
@@ -426,9 +488,12 @@ async function initializeDatabase() {
     addSqliteColumnIfMissing("requisitions", "procurementStatus", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "deliveryConfirmation", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "deliveryRemarks", "TEXT NOT NULL DEFAULT ''");
+    addSqliteColumnIfMissing("requisitions", "projectId", "TEXT NOT NULL DEFAULT 'sample'");
+    sqliteDb.exec("CREATE INDEX IF NOT EXISTS requisitionsProjectIdIndex ON requisitions(projectId);");
   }
 
   await seedAccounts();
+  await seedProjects();
   await seedRequisitions();
   await migrateProcurementStatuses();
 }
@@ -455,6 +520,25 @@ async function seedAccounts() {
   });
 }
 
+async function seedProjects() {
+  if (await getProjectById("sample")) {
+    return;
+  }
+
+  await createProject("sample", {
+    title: "Sample",
+    director: "",
+    startDate: "",
+    endDate: "",
+    managers: "Pel Martine Ailes",
+    engineers: "",
+    projectCosts: "",
+    contractors: "",
+    locationSite: "",
+    projectCode: "SAMPLE"
+  });
+}
+
 async function seedRequisitions() {
   const count = await getCount("requisitions");
 
@@ -466,6 +550,7 @@ async function seedRequisitions() {
     {
       id: "REQ-1042",
       item: "Safety helmets",
+      projectId: "sample",
       category: "PPE",
       quantity: "36",
       neededDate: "2026-05-14",
@@ -478,6 +563,7 @@ async function seedRequisitions() {
     {
       id: "REQ-1043",
       item: "Rotary hammer drill",
+      projectId: "sample",
       category: "Equipment",
       quantity: "2",
       neededDate: "2026-05-18",
@@ -490,6 +576,7 @@ async function seedRequisitions() {
     {
       id: "REQ-1044",
       item: "PVC conduit 25mm",
+      projectId: "sample",
       category: "Material",
       quantity: "120",
       neededDate: "2026-05-20",
@@ -502,6 +589,95 @@ async function seedRequisitions() {
   ]) {
     await createSeedRequisition(requisition);
   }
+}
+
+async function getProjects() {
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT * FROM projects ORDER BY created_at ASC, title ASC");
+    return result.rows.map(mapProject);
+  }
+
+  return sqliteDb.prepare("SELECT * FROM projects ORDER BY createdAt ASC, title ASC").all().map(mapProject);
+}
+
+async function getProjectById(id) {
+  const projectId = cleanText(id) || "sample";
+
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT * FROM projects WHERE id = $1", [projectId]);
+    return result.rows[0] ? mapProject(result.rows[0]) : null;
+  }
+
+  const project = sqliteDb.prepare("SELECT * FROM projects WHERE id = ?").get(projectId);
+  return project ? mapProject(project) : null;
+}
+
+async function getProjectByCode(projectCode) {
+  const code = cleanText(projectCode).toLowerCase();
+
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT * FROM projects WHERE lower(project_code) = $1", [code]);
+    return result.rows[0] ? mapProject(result.rows[0]) : null;
+  }
+
+  const project = sqliteDb.prepare("SELECT * FROM projects WHERE lower(projectCode) = ?").get(code);
+  return project ? mapProject(project) : null;
+}
+
+async function getNextProjectId() {
+  const projects = await getProjects();
+  const highest = projects.reduce((max, project) => {
+    const match = /^PRJ-(\d+)$/.exec(project.id);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 1000);
+
+  return `PRJ-${highest + 1}`;
+}
+
+async function createProject(id, project) {
+  if (usePostgres) {
+    await pgPool.query(
+      `INSERT INTO projects (
+        id, title, director, start_date, end_date, managers, engineers,
+        project_costs, contractors, location_site, project_code
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        id,
+        project.title,
+        project.director,
+        project.startDate,
+        project.endDate,
+        project.managers,
+        project.engineers,
+        project.projectCosts,
+        project.contractors,
+        project.locationSite,
+        project.projectCode
+      ]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `INSERT INTO projects (
+        id, title, director, startDate, endDate, managers, engineers,
+        projectCosts, contractors, locationSite, projectCode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      project.title,
+      project.director,
+      project.startDate,
+      project.endDate,
+      project.managers,
+      project.engineers,
+      project.projectCosts,
+      project.contractors,
+      project.locationSite,
+      project.projectCode
+    );
 }
 
 async function migrateProcurementStatuses() {
@@ -628,14 +804,19 @@ async function createAccount(account) {
     );
 }
 
-async function getRequisitions() {
+async function getRequisitions(projectId = "") {
   let requisitions;
+  const cleanProjectId = cleanText(projectId);
 
   if (usePostgres) {
-    const result = await pgPool.query("SELECT * FROM requisitions ORDER BY created_at DESC, id DESC");
+    const result = cleanProjectId
+      ? await pgPool.query("SELECT * FROM requisitions WHERE project_id = $1 ORDER BY created_at DESC, id DESC", [cleanProjectId])
+      : await pgPool.query("SELECT * FROM requisitions ORDER BY created_at DESC, id DESC");
     requisitions = result.rows.map(mapRequisition);
   } else {
-    requisitions = sqliteDb.prepare("SELECT * FROM requisitions ORDER BY createdAt DESC, id DESC").all().map(mapRequisition);
+    requisitions = cleanProjectId
+      ? sqliteDb.prepare("SELECT * FROM requisitions WHERE projectId = ? ORDER BY createdAt DESC, id DESC").all(cleanProjectId).map(mapRequisition)
+      : sqliteDb.prepare("SELECT * FROM requisitions ORDER BY createdAt DESC, id DESC").all().map(mapRequisition);
   }
 
   return Promise.all(requisitions.map(attachRequisitionHistory));
@@ -669,10 +850,11 @@ async function createRequisition(id, requisition) {
   if (usePostgres) {
     await pgPool.query(
       `INSERT INTO requisitions (
-        id, item, category, quantity, needed_date, priority, requested_by, charge_to, status, notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        id, project_id, item, category, quantity, needed_date, priority, requested_by, charge_to, status, notes
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         id,
+        requisition.projectId,
         requisition.item,
         requisition.category,
         requisition.quantity,
@@ -690,11 +872,12 @@ async function createRequisition(id, requisition) {
   sqliteDb
     .prepare(
       `INSERT INTO requisitions (
-        id, item, category, quantity, neededDate, priority, requestedBy, chargeTo, status, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, projectId, item, category, quantity, neededDate, priority, requestedBy, chargeTo, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
+      requisition.projectId,
       requisition.item,
       requisition.category,
       requisition.quantity,
@@ -711,10 +894,11 @@ async function createSeedRequisition(requisition) {
   if (usePostgres) {
     await pgPool.query(
       `INSERT INTO requisitions (
-        id, item, category, quantity, needed_date, priority, requested_by, charge_to, status, notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        id, project_id, item, category, quantity, needed_date, priority, requested_by, charge_to, status, notes
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         requisition.id,
+        requisition.projectId || "sample",
         requisition.item,
         requisition.category,
         requisition.quantity,
@@ -732,11 +916,12 @@ async function createSeedRequisition(requisition) {
   sqliteDb
     .prepare(
       `INSERT INTO requisitions (
-        id, item, category, quantity, neededDate, priority, requestedBy, chargeTo, status, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        id, projectId, item, category, quantity, neededDate, priority, requestedBy, chargeTo, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       requisition.id,
+      requisition.projectId || "sample",
       requisition.item,
       requisition.category,
       requisition.quantity,
@@ -837,6 +1022,7 @@ function readRequisitionBody(body) {
   const priority = cleanText(body.priority) || "Normal";
 
   return {
+    projectId: cleanText(body.projectId) || "sample",
     item: cleanText(body.item),
     category: cleanText(body.category),
     quantity: cleanText(body.quantity),
@@ -845,6 +1031,21 @@ function readRequisitionBody(body) {
     requestedBy: cleanText(body.requestedBy),
     chargeTo: cleanText(body.chargeTo),
     notes: cleanText(body.notes)
+  };
+}
+
+function readProjectBody(body) {
+  return {
+    title: cleanText(body.title),
+    director: cleanText(body.director),
+    startDate: cleanText(body.startDate),
+    endDate: cleanText(body.endDate),
+    managers: cleanText(body.managers),
+    engineers: cleanText(body.engineers),
+    projectCosts: cleanText(body.projectCosts),
+    contractors: cleanText(body.contractors),
+    locationSite: cleanText(body.locationSite),
+    projectCode: cleanText(body.projectCode).toUpperCase()
   };
 }
 
@@ -878,9 +1079,27 @@ function mapAccount(account) {
   };
 }
 
+function mapProject(project) {
+  return {
+    id: project.id,
+    title: project.title,
+    director: project.director || "",
+    startDate: project.startDate || project.start_date || "",
+    endDate: project.endDate || project.end_date || "",
+    managers: project.managers || "",
+    engineers: project.engineers || "",
+    projectCosts: project.projectCosts || project.project_costs || "",
+    contractors: project.contractors || "",
+    locationSite: project.locationSite || project.location_site || "",
+    projectCode: project.projectCode || project.project_code || "",
+    createdAt: project.createdAt || project.created_at || ""
+  };
+}
+
 function mapRequisition(requisition) {
   return {
     id: requisition.id,
+    projectId: requisition.projectId || requisition.project_id || "sample",
     item: requisition.item,
     category: requisition.category,
     quantity: requisition.quantity,

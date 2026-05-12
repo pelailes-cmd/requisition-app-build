@@ -58,6 +58,7 @@ const DELIVERY_CONFIRMATION_OPTIONS = ["Confirmed", "With Discrepancy"];
 const INITIAL_ITEMS = [
   {
     id: "REQ-1042",
+    projectId: "sample",
     item: "Safety helmets",
     category: "PPE",
     quantity: "36",
@@ -71,6 +72,7 @@ const INITIAL_ITEMS = [
   },
   {
     id: "REQ-1043",
+    projectId: "sample",
     item: "Rotary hammer drill",
     category: "Equipment",
     quantity: "2",
@@ -84,6 +86,7 @@ const INITIAL_ITEMS = [
   },
   {
     id: "REQ-1044",
+    projectId: "sample",
     item: "PVC conduit 25mm",
     category: "Material",
     quantity: "120",
@@ -97,6 +100,22 @@ const INITIAL_ITEMS = [
   }
 ];
 
+const INITIAL_PROJECTS = [
+  {
+    id: "sample",
+    title: "Sample",
+    director: "",
+    startDate: "",
+    endDate: "",
+    managers: "Pel Martine Ailes",
+    engineers: "",
+    projectCosts: "",
+    contractors: "",
+    locationSite: "",
+    projectCode: "SAMPLE"
+  }
+];
+
 const EMPTY_FORM = {
   item: "",
   category: "",
@@ -106,6 +125,19 @@ const EMPTY_FORM = {
   requestedBy: "",
   chargeTo: "",
   notes: ""
+};
+
+const EMPTY_PROJECT_FORM = {
+  title: "",
+  director: "",
+  startDate: "",
+  endDate: "",
+  managers: "",
+  engineers: "",
+  projectCosts: "",
+  contractors: "",
+  locationSite: "",
+  projectCode: ""
 };
 
 const MANAGER_EMAIL = "afhinzz.ailes@gmail.com";
@@ -154,6 +186,11 @@ export default function App() {
   const [isOtpRequesting, setIsOtpRequesting] = useState(false);
   const [otpCooldownSeconds, setOtpCooldownSeconds] = useState(0);
   const [signupForm, setSignupForm] = useState(EMPTY_SIGNUP_FORM);
+  const [projects, setProjects] = useState(INITIAL_PROJECTS);
+  const [selectedProjectId, setSelectedProjectId] = useState("sample");
+  const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
+  const [projectForm, setProjectForm] = useState(EMPTY_PROJECT_FORM);
   const [items, setItems] = useState(INITIAL_ITEMS);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -167,6 +204,7 @@ export default function App() {
 
   const permissions = selectedRole ? PERMISSIONS[selectedRole] : {};
   const canConfirmDelivery = user?.role === "Engineer" || user?.role === "Staff";
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) || projects[0] || INITIAL_PROJECTS[0];
 
   const managerAccounts = useMemo(() => {
     return accounts.filter((account) => account.role === "Manager");
@@ -182,8 +220,14 @@ export default function App() {
 
   useEffect(() => {
     loadAccounts();
-    loadItems();
+    loadProjects();
   }, []);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      loadItems(selectedProjectId);
+    }
+  }, [selectedProjectId]);
 
   useEffect(() => {
     if (otpCooldownSeconds <= 0) {
@@ -257,6 +301,7 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...form,
+            projectId: selectedProjectId,
             changedBy: getEditorName(user)
           })
         }
@@ -391,9 +436,27 @@ export default function App() {
     }
   };
 
-  const loadItems = async () => {
+  const loadProjects = async () => {
     try {
-      const response = await fetch(`${OTP_API_URL}/requisitions`);
+      const response = await fetch(`${OTP_API_URL}/projects`);
+      const result = await response.json();
+
+      if (response.ok && Array.isArray(result.projects) && result.projects.length > 0) {
+        setProjects(result.projects);
+
+        if (!result.projects.some((project) => project.id === selectedProjectId)) {
+          setSelectedProjectId(result.projects[0].id);
+        }
+      }
+    } catch (error) {
+      console.log("Could not load backend projects", error);
+    }
+  };
+
+  const loadItems = async (projectId = selectedProjectId) => {
+    try {
+      const queryString = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const response = await fetch(`${OTP_API_URL}/requisitions${queryString}`);
       const result = await response.json();
 
       if (response.ok && Array.isArray(result.requisitions)) {
@@ -401,6 +464,40 @@ export default function App() {
       }
     } catch (error) {
       console.log("Could not load backend requisitions", error);
+    }
+  };
+
+  const updateProjectField = (field, value) => {
+    setProjectForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const saveProject = async () => {
+    if (!projectForm.title.trim() || !projectForm.projectCode.trim()) {
+      Alert.alert("Missing project information", "Project name/title and project code are required.");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(projectForm)
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Project not saved", result.error || "The backend could not save this project.");
+        return;
+      }
+
+      setProjects((current) => [...current, result.project]);
+      setSelectedProjectId(result.project.id);
+      setProjectForm(EMPTY_PROJECT_FORM);
+      setIsProjectFormOpen(false);
+      setIsProjectMenuOpen(false);
+      setItems([]);
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
     }
   };
 
@@ -456,19 +553,19 @@ export default function App() {
 
   const exportAllRequisitions = async () => {
     await exportPdfToDownloads({
-      html: buildAllRequisitionsPdfHtml(items),
+      html: buildAllRequisitionsPdfHtml(items, selectedProject),
       fileName: buildPrsFileName(),
       successTitle: "Export complete",
-      successMessage: "All requisitions were exported as a compact PDF table."
+      successMessage: `${selectedProject.title} requisitions were exported as a compact PDF table.`
     });
   };
 
   const shareAllRequisitions = async () => {
     await exportPdfForSharing({
-      html: buildAllRequisitionsPdfHtml(items),
+      html: buildAllRequisitionsPdfHtml(items, selectedProject),
       fileName: buildPrsFileName(),
       successTitle: "Share ready",
-      successMessage: "All requisitions were prepared as a compact PDF table."
+      successMessage: `${selectedProject.title} requisitions were prepared as a compact PDF table.`
     });
   };
 
@@ -825,12 +922,32 @@ export default function App() {
     <AppFrame>
       <ScrollView contentContainerStyle={styles.dashboard} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerTextBlock}>
             <Text style={styles.kicker}>{user.role} workspace</Text>
             <Text style={styles.dashboardTitle}>Requisitions</Text>
-            <Text style={styles.subtitle}>Signed in as {user.firstName} {user.lastName}</Text>
+            <Text style={styles.subtitle}>
+              {selectedProject.title} project - Signed in as {user.firstName} {user.lastName}
+            </Text>
           </View>
           <View style={styles.headerActions}>
+            {user.role === "Manager" && (
+              <ProjectDropdown
+                projects={projects}
+                selectedProjectId={selectedProjectId}
+                visible={isProjectMenuOpen}
+                onOpen={() => setIsProjectMenuOpen(true)}
+                onClose={() => setIsProjectMenuOpen(false)}
+                onSelect={(projectId) => {
+                  setSelectedProjectId(projectId);
+                  setIsProjectMenuOpen(false);
+                }}
+                onCreate={() => {
+                  setProjectForm(EMPTY_PROJECT_FORM);
+                  setIsProjectMenuOpen(false);
+                  setIsProjectFormOpen(true);
+                }}
+              />
+            )}
             <HoverPressable style={styles.headerIconButton} onPress={exportAllRequisitions}>
               <Feather name="download" size={18} color="#111827" />
             </HoverPressable>
@@ -939,9 +1056,21 @@ export default function App() {
         onSave={saveItem}
       />
 
+      <ProjectFormModal
+        visible={isProjectFormOpen}
+        form={projectForm}
+        onChange={updateProjectField}
+        onClose={() => {
+          setProjectForm(EMPTY_PROJECT_FORM);
+          setIsProjectFormOpen(false);
+        }}
+        onSave={saveProject}
+      />
+
       <RequisitionDetailModal
         visible={!!selectedRequisition}
         item={selectedRequisition}
+        project={selectedProject}
         onClose={() => setSelectedRequisitionId(null)}
       />
     </AppFrame>
@@ -1241,7 +1370,7 @@ function SortViewDropdown({ visible, sortOrder, viewMode, onOpen, onClose, onSor
     <View>
       <HoverPressable style={styles.displayMenuButton} onPress={onOpen}>
         <Feather name="sliders" size={17} color="#111827" />
-        <Text style={styles.displayMenuButtonText}>{sortOrder} · {viewMode}</Text>
+        <Text style={styles.displayMenuButtonText}>{sortOrder} - {viewMode}</Text>
         <Feather name="chevron-down" size={16} color="#111827" />
       </HoverPressable>
 
@@ -1295,6 +1424,64 @@ function SortViewDropdown({ visible, sortOrder, viewMode, onOpen, onClose, onSor
             <HoverPressable style={styles.primaryButton} onPress={onClose}>
               <Text style={styles.primaryButtonText}>Apply</Text>
               <Feather name="check" size={18} color="#ffffff" />
+            </HoverPressable>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+function ProjectDropdown({ projects, selectedProjectId, visible, onOpen, onClose, onSelect, onCreate }) {
+  const selectedProject = projects.find((project) => project.id === selectedProjectId);
+
+  return (
+    <View>
+      <HoverPressable style={styles.projectMenuButton} onPress={onOpen}>
+        <Feather name="folder" size={17} color="#111827" />
+        <Text style={styles.projectMenuButtonText}>Projects</Text>
+        <Feather name="chevron-down" size={16} color="#111827" />
+      </HoverPressable>
+
+      <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+        <View style={styles.dropdownOverlay}>
+          <View style={styles.dropdownPanel}>
+            <View style={styles.dropdownHeader}>
+              <View>
+                <Text style={styles.kicker}>Current project</Text>
+                <Text style={styles.modalTitle}>{selectedProject?.title || "Projects"}</Text>
+              </View>
+              <HoverPressable style={styles.iconButton} onPress={onClose}>
+                <Feather name="x" size={20} color="#111827" />
+              </HoverPressable>
+            </View>
+
+            <ScrollView style={styles.projectMenuList} showsVerticalScrollIndicator={false}>
+              <View style={styles.managerList}>
+                {projects.map((project) => {
+                  const isSelected = project.id === selectedProjectId;
+                  const meta = [project.projectCode, project.locationSite].filter(Boolean).join(" - ");
+
+                  return (
+                    <HoverPressable
+                      key={project.id}
+                      style={[styles.managerOption, isSelected && styles.managerOptionActive]}
+                      onPress={() => onSelect(project.id)}
+                    >
+                      <View style={styles.managerOptionText}>
+                        <Text style={styles.managerName}>{project.title}</Text>
+                        <Text style={styles.managerEmail}>{meta || "No project details yet"}</Text>
+                      </View>
+                      {isSelected && <Feather name="check" size={18} color="#047857" />}
+                    </HoverPressable>
+                  );
+                })}
+              </View>
+            </ScrollView>
+
+            <HoverPressable style={styles.primaryButton} onPress={onCreate}>
+              <Text style={styles.primaryButtonText}>Add new project</Text>
+              <Feather name="plus" size={18} color="#ffffff" />
             </HoverPressable>
           </View>
         </View>
@@ -1366,7 +1553,7 @@ function ManagerDropdown({ managers, selectedUsername, onSelect }) {
   );
 }
 
-function CalendarField({ value, onSelect }) {
+function CalendarField({ value, onSelect, label = "Needed date", placeholder = "Select needed date" }) {
   const [isOpen, setIsOpen] = useState(false);
   const [visibleMonth, setVisibleMonth] = useState(() => parseDate(value) || new Date());
   const monthStart = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
@@ -1378,11 +1565,11 @@ function CalendarField({ value, onSelect }) {
 
   return (
     <View>
-      <Text style={styles.sectionLabel}>Needed date</Text>
+      <Text style={styles.sectionLabel}>{label}</Text>
       <HoverPressable style={styles.dropdownButton} onPress={() => setIsOpen(true)}>
         <View style={styles.dropdownTextBlock}>
           <Text style={[styles.dropdownValue, !value && styles.dropdownPlaceholder]}>
-            {value || "Select needed date"}
+            {value || placeholder}
           </Text>
         </View>
         <Feather name="calendar" size={20} color="#475569" />
@@ -1462,7 +1649,7 @@ function HistoryRow({ history }) {
   );
 }
 
-function RequisitionDetailModal({ visible, item, onClose }) {
+function RequisitionDetailModal({ visible, item, project, onClose }) {
   if (!item) {
     return null;
   }
@@ -1471,7 +1658,7 @@ function RequisitionDetailModal({ visible, item, onClose }) {
 
   const exportPdf = async () => {
     await exportPdfToDownloads({
-      html: buildRequisitionPdfHtml(item),
+      html: buildRequisitionPdfHtml(item, project),
       fileName: buildPrsFileName(item),
       successTitle: "Export complete",
       successMessage: `${item.id} was saved as a PDF.`
@@ -1480,7 +1667,7 @@ function RequisitionDetailModal({ visible, item, onClose }) {
 
   const sharePdf = async () => {
     await exportPdfForSharing({
-      html: buildRequisitionPdfHtml(item),
+      html: buildRequisitionPdfHtml(item, project),
       fileName: buildPrsFileName(item),
       successTitle: "Share ready",
       successMessage: `${item.id} was prepared as a PDF.`
@@ -1521,6 +1708,8 @@ function RequisitionDetailModal({ visible, item, onClose }) {
 
             <View style={styles.detailSection}>
               <Text style={styles.detailSectionTitle}>Request information</Text>
+              <DetailRow label="Project" value={project?.title || "Sample"} />
+              <DetailRow label="Project code" value={project?.projectCode || "SAMPLE"} />
               <DetailRow label="Item / Equipment" value={item.item || "Unspecified"} />
               <DetailRow label="Category" value={item.category || "Unspecified"} />
               <DetailRow label="Quantity" value={item.quantity || "Unspecified"} />
@@ -1567,6 +1756,112 @@ function RequisitionDetailModal({ visible, item, onClose }) {
               <Text style={styles.secondaryButtonText}>Share</Text>
             </HoverPressable>
           </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ProjectFormModal({ visible, form, onChange, onClose, onSave }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalPanel}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalTitleBlock}>
+              <Text style={styles.kicker}>Project setup</Text>
+              <Text style={styles.modalTitle}>Add new project</Text>
+            </View>
+            <HoverPressable style={styles.iconButton} onPress={onClose}>
+              <Feather name="x" size={20} color="#111827" />
+            </HoverPressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
+            <TextInput
+              placeholder="Project name/title"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.title}
+              onChangeText={(value) => onChange("title", value)}
+            />
+            <TextInput
+              placeholder="Project code"
+              placeholderTextColor="#9ca3af"
+              autoCapitalize="characters"
+              style={styles.input}
+              value={form.projectCode}
+              onChangeText={(value) => onChange("projectCode", value)}
+            />
+            <TextInput
+              placeholder="Director"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.director}
+              onChangeText={(value) => onChange("director", value)}
+            />
+            <View style={styles.twoColumn}>
+              <View style={styles.flexInput}>
+                <CalendarField
+                  label="Start date"
+                  placeholder="Select start date"
+                  value={form.startDate}
+                  onSelect={(value) => onChange("startDate", value)}
+                />
+              </View>
+              <View style={styles.flexInput}>
+                <CalendarField
+                  label="End date"
+                  placeholder="Select end date"
+                  value={form.endDate}
+                  onSelect={(value) => onChange("endDate", value)}
+                />
+              </View>
+            </View>
+            <TextInput
+              multiline
+              placeholder="Manager/s"
+              placeholderTextColor="#9ca3af"
+              style={[styles.input, styles.textarea]}
+              value={form.managers}
+              onChangeText={(value) => onChange("managers", value)}
+            />
+            <TextInput
+              multiline
+              placeholder="Engineer/s"
+              placeholderTextColor="#9ca3af"
+              style={[styles.input, styles.textarea]}
+              value={form.engineers}
+              onChangeText={(value) => onChange("engineers", value)}
+            />
+            <TextInput
+              placeholder="Project costs"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.projectCosts}
+              onChangeText={(value) => onChange("projectCosts", value)}
+            />
+            <TextInput
+              multiline
+              placeholder="Contractor/s"
+              placeholderTextColor="#9ca3af"
+              style={[styles.input, styles.textarea]}
+              value={form.contractors}
+              onChangeText={(value) => onChange("contractors", value)}
+            />
+            <TextInput
+              placeholder="Location/Site"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.locationSite}
+              onChangeText={(value) => onChange("locationSite", value)}
+            />
+          </ScrollView>
+
+          <HoverPressable style={styles.primaryButton} onPress={onSave}>
+            <Text style={styles.primaryButtonText}>Save project</Text>
+            <Feather name="check" size={18} color="#ffffff" />
+          </HoverPressable>
         </View>
       </View>
     </Modal>
@@ -1836,8 +2131,10 @@ async function writePdfToSafDirectory(sourceUri, directoryUri, fileName) {
   return destinationUri;
 }
 
-function buildRequisitionPdfHtml(item) {
+function buildRequisitionPdfHtml(item, project = null) {
   const rows = [
+    ["Project", getDisplayValue(project?.title, "Sample")],
+    ["Project code", getDisplayValue(project?.projectCode, "SAMPLE")],
     ["Requisition ID", item.id],
     ["Item / Equipment", item.item],
     ["Category", getDisplayValue(item.category, "Unspecified")],
@@ -1966,7 +2263,9 @@ function buildRequisitionPdfHtml(item) {
   `;
 }
 
-function buildAllRequisitionsPdfHtml(requisitions) {
+function buildAllRequisitionsPdfHtml(requisitions, project = null) {
+  const title = project?.title ? `${project.title} Requisitions` : "All Requisitions";
+  const projectDetails = [project?.projectCode, project?.locationSite].filter(Boolean).join(" - ");
   const rows = requisitions.map((item, index) => `
     <tr>
       <td>${index + 1}</td>
@@ -2071,8 +2370,10 @@ function buildAllRequisitionsPdfHtml(requisitions) {
       <body>
         <div class="header">
           <p class="eyebrow">Material and Equipment Requisition</p>
-          <h1>All Requisitions</h1>
-          <div class="meta">Generated on ${escapeHtml(new Date().toLocaleString())} · ${requisitions.length} record(s)</div>
+          <h1>${escapeHtml(title)}</h1>
+          <div class="meta">
+            Generated on ${escapeHtml(new Date().toLocaleString())} - ${requisitions.length} record(s)${projectDetails ? ` - ${escapeHtml(projectDetails)}` : ""}
+          </div>
         </div>
         ${requisitions.length === 0 ? `
           <div class="empty">No requisitions available for export.</div>
@@ -2346,8 +2647,15 @@ const styles = StyleSheet.create({
   header: {
     alignItems: "flex-start",
     flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
     justifyContent: "space-between",
     marginBottom: 18
+  },
+  headerTextBlock: {
+    flex: 1,
+    minWidth: 180,
+    paddingRight: 4
   },
   dashboardTitle: {
     color: "#111827",
@@ -2357,6 +2665,7 @@ const styles = StyleSheet.create({
   },
   headerActions: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8
   },
   headerIconButton: {
@@ -2480,6 +2789,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12
   },
   displayMenuButtonText: {
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  projectMenuButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    justifyContent: "center",
+    minHeight: 44,
+    paddingHorizontal: 12
+  },
+  projectMenuButtonText: {
     color: "#111827",
     fontSize: 13,
     fontWeight: "800"
@@ -2925,6 +3251,10 @@ const styles = StyleSheet.create({
   managerList: {
     gap: 10
   },
+  projectMenuList: {
+    marginBottom: 14,
+    maxHeight: 320
+  },
   managerOption: {
     alignItems: "center",
     backgroundColor: "#ffffff",
@@ -2982,6 +3312,10 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8,
     marginVertical: 12
+  },
+  formStack: {
+    gap: 12,
+    paddingBottom: 12
   },
   segment: {
     backgroundColor: "#ffffff",
