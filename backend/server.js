@@ -86,7 +86,17 @@ app.post("/projects", async (req, res) => {
     return res.status(400).json({ error: "Project title and project code are required." });
   }
 
-  const existingProject = await getProjectByCode(project.projectCode);
+  if (!project.managerUsername) {
+    return res.status(400).json({ error: "Manager username is required." });
+  }
+
+  const managerAccount = await getAccountByUsername(project.managerUsername);
+
+  if (!managerAccount || managerAccount.role !== "Manager") {
+    return res.status(403).json({ error: "Only a registered manager can create projects." });
+  }
+
+  const existingProject = await getProjectByCode(project.projectCode, project.managerUsername);
 
   if (existingProject) {
     return res.status(409).json({ error: "Project code already exists." });
@@ -100,13 +110,18 @@ app.post("/projects", async (req, res) => {
 app.get("/projects/:id/access", async (req, res) => {
   const projectId = cleanText(req.params.id);
   const managerUsername = cleanText(req.query.managerUsername).toLowerCase();
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     return res.status(404).json({ error: "Project not found." });
   }
 
   if (!managerUsername) {
     return res.status(400).json({ error: "Manager username is required." });
+  }
+
+  if (!isProjectManagedBy(project, managerUsername)) {
+    return res.status(403).json({ error: "You can only manage access for your own projects." });
   }
 
   return res.json({ users: await getProjectAccessUsers(projectId, managerUsername) });
@@ -116,13 +131,18 @@ app.put("/projects/:id/access", async (req, res) => {
   const projectId = cleanText(req.params.id);
   const managerUsername = cleanText(req.body.managerUsername).toLowerCase();
   const usernames = readUsernameList(req.body.usernames);
+  const project = await getProjectById(projectId);
 
-  if (!(await getProjectById(projectId))) {
+  if (!project) {
     return res.status(404).json({ error: "Project not found." });
   }
 
   if (!managerUsername) {
     return res.status(400).json({ error: "Manager username is required." });
+  }
+
+  if (!isProjectManagedBy(project, managerUsername)) {
+    return res.status(403).json({ error: "You can only manage access for your own projects." });
   }
 
   await replaceProjectAccess(projectId, managerUsername, usernames);
@@ -307,9 +327,21 @@ app.post("/accounts", async (req, res) => {
     return res.status(409).json({ error: "Username unavailable." });
   }
 
+  const selectedManager = await getAccountByUsername(account.managerUsername);
+
+  if (!selectedManager || selectedManager.role !== "Manager") {
+    return res.status(400).json({ error: "Select a registered manager before creating the account." });
+  }
+
   await createAccount(account);
-  if (account.role !== "Manager") {
-    await grantProjectAccess("sample", account.username, account.managerUsername);
+  if (account.role === "Manager") {
+    await ensureManagerSampleProject(account);
+  } else {
+    const managerSampleProject = await ensureManagerSampleProject(account.managerUsername);
+
+    if (managerSampleProject) {
+      await grantProjectAccess(managerSampleProject.id, account.username, account.managerUsername);
+    }
   }
   return res.status(201).json({ account: await getAccountByUsername(account.username) });
 });
@@ -432,7 +464,8 @@ async function initializeDatabase() {
         project_costs TEXT NOT NULL DEFAULT '',
         contractors TEXT NOT NULL DEFAULT '',
         location_site TEXT NOT NULL DEFAULT '',
-        project_code TEXT NOT NULL UNIQUE,
+        project_code TEXT NOT NULL,
+        manager_username TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -479,6 +512,10 @@ async function initializeDatabase() {
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_confirmation TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_remarks TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT 'sample'");
+    await pgPool.query("ALTER TABLE projects ADD COLUMN IF NOT EXISTS manager_username TEXT NOT NULL DEFAULT ''");
+    await pgPool.query("ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_project_code_key");
+    await pgPool.query("CREATE INDEX IF NOT EXISTS projects_manager_username_idx ON projects(manager_username)");
+    await pgPool.query("CREATE UNIQUE INDEX IF NOT EXISTS projects_manager_code_idx ON projects(manager_username, project_code)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS requisitions_project_id_idx ON requisitions(project_id)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_username_idx ON project_members(username)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_manager_idx ON project_members(manager_username)");
@@ -511,7 +548,8 @@ async function initializeDatabase() {
         projectCosts TEXT NOT NULL DEFAULT '',
         contractors TEXT NOT NULL DEFAULT '',
         locationSite TEXT NOT NULL DEFAULT '',
-        projectCode TEXT NOT NULL UNIQUE,
+        projectCode TEXT NOT NULL,
+        managerUsername TEXT NOT NULL DEFAULT '',
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -559,6 +597,9 @@ async function initializeDatabase() {
     addSqliteColumnIfMissing("requisitions", "deliveryConfirmation", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "deliveryRemarks", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "projectId", "TEXT NOT NULL DEFAULT 'sample'");
+    addSqliteColumnIfMissing("projects", "managerUsername", "TEXT NOT NULL DEFAULT ''");
+    sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectsManagerUsernameIndex ON projects(managerUsername);");
+    sqliteDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS projectsManagerCodeIndex ON projects(managerUsername, projectCode);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS requisitionsProjectIdIndex ON requisitions(projectId);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersUsernameIndex ON project_members(username);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersManagerIndex ON project_members(managerUsername);");
@@ -566,6 +607,9 @@ async function initializeDatabase() {
 
   await seedAccounts();
   await seedProjects();
+  await backfillProjectManagers();
+  await ensureManagerSampleProjects();
+  await pruneInvalidProjectAccess();
   await seedProjectAccess();
   await seedRequisitions();
   await migrateProcurementStatuses();
@@ -608,20 +652,179 @@ async function seedProjects() {
     projectCosts: "",
     contractors: "",
     locationSite: "",
-    projectCode: "SAMPLE"
+    projectCode: "SAMPLE",
+    managerUsername: "pelailes"
   });
 }
 
-async function seedProjectAccess() {
-  if ((await getCount("project_members")) > 0) {
+async function backfillProjectManagers() {
+  const defaultManagerUsername = await getDefaultManagerUsername();
+
+  if (!defaultManagerUsername) {
     return;
   }
 
+  const projects = await getProjects();
+
+  for (const project of projects) {
+    if (project.managerUsername) {
+      continue;
+    }
+
+    await updateProjectManagerUsername(
+      project.id,
+      (await getProjectAccessManagerUsername(project.id)) || defaultManagerUsername
+    );
+  }
+}
+
+async function getProjectAccessManagerUsername(projectId) {
+  const id = cleanText(projectId);
+
+  if (usePostgres) {
+    const result = await pgPool.query(
+      `SELECT DISTINCT lower(manager_username) AS manager_username
+       FROM project_members
+       WHERE project_id = $1 AND COALESCE(manager_username, '') <> ''`,
+      [id]
+    );
+    return result.rows.length === 1 ? result.rows[0].manager_username : "";
+  }
+
+  const rows = sqliteDb
+    .prepare(
+      `SELECT DISTINCT lower(managerUsername) AS managerUsername
+       FROM project_members
+       WHERE projectId = ? AND COALESCE(managerUsername, '') <> ''`
+    )
+    .all(id);
+  return rows.length === 1 ? rows[0].managerUsername : "";
+}
+
+async function updateProjectManagerUsername(projectId, managerUsername) {
+  const id = cleanText(projectId);
+  const manager = cleanText(managerUsername).toLowerCase();
+
+  if (!id || !manager) {
+    return;
+  }
+
+  if (usePostgres) {
+    await pgPool.query("UPDATE projects SET manager_username = $1, updated_at = NOW() WHERE id = $2", [manager, id]);
+    return;
+  }
+
+  sqliteDb.prepare("UPDATE projects SET managerUsername = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?").run(manager, id);
+}
+
+async function ensureManagerSampleProjects() {
+  const managers = (await getAccounts()).filter((account) => account.role === "Manager");
+
+  for (const manager of managers) {
+    await ensureManagerSampleProject(manager);
+  }
+}
+
+async function pruneInvalidProjectAccess() {
+  if (usePostgres) {
+    await pgPool.query(
+      `DELETE FROM project_members pm
+       USING projects p
+       WHERE pm.project_id = p.id
+         AND lower(COALESCE(p.manager_username, '')) <> lower(COALESCE(pm.manager_username, ''))`
+    );
+    return;
+  }
+
+  sqliteDb.exec(`
+    DELETE FROM project_members
+    WHERE EXISTS (
+      SELECT 1
+      FROM projects
+      WHERE projects.id = project_members.projectId
+        AND lower(COALESCE(projects.managerUsername, '')) <> lower(COALESCE(project_members.managerUsername, ''))
+    );
+  `);
+}
+
+async function seedProjectAccess() {
   const accounts = (await getAccounts()).filter((account) => account.role !== "Manager");
 
   for (const account of accounts) {
-    await grantProjectAccess("sample", account.username, account.managerUsername);
+    const managerSampleProject = await ensureManagerSampleProject(account.managerUsername);
+
+    if (managerSampleProject) {
+      await grantProjectAccess(managerSampleProject.id, account.username, account.managerUsername);
+    }
   }
+}
+
+async function ensureManagerSampleProject(managerAccountOrUsername) {
+  const managerAccount =
+    typeof managerAccountOrUsername === "string"
+      ? await getAccountByUsername(managerAccountOrUsername)
+      : managerAccountOrUsername;
+
+  if (!managerAccount || managerAccount.role !== "Manager") {
+    return null;
+  }
+
+  const managerUsername = cleanText(managerAccount.username).toLowerCase();
+  const existingSample = (await getProjectsManagedBy(managerUsername)).find(
+    (project) => project.title.toLowerCase() === "sample"
+  );
+
+  if (existingSample) {
+    return existingSample;
+  }
+
+  let projectId = getManagerSampleProjectId(managerUsername);
+
+  if (await getProjectById(projectId)) {
+    projectId = await getNextProjectId();
+  }
+
+  await createProject(projectId, {
+    title: "Sample",
+    director: "",
+    startDate: "",
+    endDate: "",
+    managers: getAccountDisplayName(managerAccount),
+    engineers: "",
+    projectCosts: "",
+    contractors: "",
+    locationSite: "",
+    projectCode: getManagerSampleProjectCode(managerUsername),
+    managerUsername
+  });
+
+  return getProjectById(projectId);
+}
+
+async function getDefaultManagerUsername() {
+  const managers = (await getAccounts()).filter((account) => account.role === "Manager");
+  const preferredManager = managers.find((account) => account.username.toLowerCase() === "pelailes");
+  const manager = preferredManager || managers[0];
+
+  return manager ? manager.username.toLowerCase() : "";
+}
+
+function getManagerSampleProjectId(managerUsername) {
+  const slug = slugifyUsername(managerUsername);
+  return slug === "pelailes" ? "sample" : `sample-${slug}`;
+}
+
+function getManagerSampleProjectCode(managerUsername) {
+  const slug = slugifyUsername(managerUsername).toUpperCase();
+  return slug === "PELAILES" ? "SAMPLE" : `SAMPLE-${slug}`;
+}
+
+function slugifyUsername(username) {
+  return cleanText(username).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "manager";
+}
+
+function getAccountDisplayName(account) {
+  return [account.firstName, account.middleName, account.lastName].map(cleanText).filter(Boolean).join(" ");
 }
 
 async function seedRequisitions() {
@@ -688,8 +891,12 @@ async function getProjects() {
 async function getProjectsForUser(username, role) {
   const normalizedUsername = cleanText(username).toLowerCase();
 
-  if (!normalizedUsername || role === "Manager") {
+  if (!normalizedUsername) {
     return getProjects();
+  }
+
+  if (role === "Manager") {
+    return getProjectsManagedBy(normalizedUsername);
   }
 
   if (usePostgres) {
@@ -716,6 +923,31 @@ async function getProjectsForUser(username, role) {
     .map(mapProject);
 }
 
+async function getProjectsManagedBy(managerUsername) {
+  const normalizedUsername = cleanText(managerUsername).toLowerCase();
+
+  if (usePostgres) {
+    const result = await pgPool.query(
+      `SELECT *
+       FROM projects
+       WHERE lower(manager_username) = $1
+       ORDER BY created_at ASC, title ASC`,
+      [normalizedUsername]
+    );
+    return result.rows.map(mapProject);
+  }
+
+  return sqliteDb
+    .prepare(
+      `SELECT *
+       FROM projects
+       WHERE lower(managerUsername) = ?
+       ORDER BY createdAt ASC, title ASC`
+    )
+    .all(normalizedUsername)
+    .map(mapProject);
+}
+
 async function getProjectById(id) {
   const projectId = cleanText(id) || "sample";
 
@@ -728,15 +960,25 @@ async function getProjectById(id) {
   return project ? mapProject(project) : null;
 }
 
-async function getProjectByCode(projectCode) {
+async function getProjectByCode(projectCode, managerUsername = "") {
   const code = cleanText(projectCode).toLowerCase();
+  const manager = cleanText(managerUsername).toLowerCase();
 
   if (usePostgres) {
-    const result = await pgPool.query("SELECT * FROM projects WHERE lower(project_code) = $1", [code]);
+    const result = manager
+      ? await pgPool.query("SELECT * FROM projects WHERE lower(project_code) = $1 AND lower(manager_username) = $2", [
+          code,
+          manager
+        ])
+      : await pgPool.query("SELECT * FROM projects WHERE lower(project_code) = $1", [code]);
     return result.rows[0] ? mapProject(result.rows[0]) : null;
   }
 
-  const project = sqliteDb.prepare("SELECT * FROM projects WHERE lower(projectCode) = ?").get(code);
+  const project = manager
+    ? sqliteDb
+        .prepare("SELECT * FROM projects WHERE lower(projectCode) = ? AND lower(managerUsername) = ?")
+        .get(code, manager)
+    : sqliteDb.prepare("SELECT * FROM projects WHERE lower(projectCode) = ?").get(code);
   return project ? mapProject(project) : null;
 }
 
@@ -755,8 +997,8 @@ async function createProject(id, project) {
     await pgPool.query(
       `INSERT INTO projects (
         id, title, director, start_date, end_date, managers, engineers,
-        project_costs, contractors, location_site, project_code
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        project_costs, contractors, location_site, project_code, manager_username
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         id,
         project.title,
@@ -768,7 +1010,8 @@ async function createProject(id, project) {
         project.projectCosts,
         project.contractors,
         project.locationSite,
-        project.projectCode
+        project.projectCode,
+        cleanText(project.managerUsername).toLowerCase()
       ]
     );
     return;
@@ -778,8 +1021,8 @@ async function createProject(id, project) {
     .prepare(
       `INSERT INTO projects (
         id, title, director, startDate, endDate, managers, engineers,
-        projectCosts, contractors, locationSite, projectCode
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        projectCosts, contractors, locationSite, projectCode, managerUsername
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -792,7 +1035,8 @@ async function createProject(id, project) {
       project.projectCosts,
       project.contractors,
       project.locationSite,
-      project.projectCode
+      project.projectCode,
+      cleanText(project.managerUsername).toLowerCase()
     );
 }
 
@@ -848,8 +1092,16 @@ async function canAccessProject(projectId, username, role) {
   const id = cleanText(projectId);
   const accountUsername = cleanText(username).toLowerCase();
 
-  if (!id || !accountUsername || role === "Manager") {
+  if (!id) {
     return true;
+  }
+
+  if (!accountUsername) {
+    return false;
+  }
+
+  if (role === "Manager") {
+    return canManageProject(id, accountUsername);
   }
 
   if (usePostgres) {
@@ -865,6 +1117,15 @@ async function canAccessProject(projectId, username, role) {
       .prepare("SELECT 1 FROM project_members WHERE projectId = ? AND lower(username) = ? LIMIT 1")
       .get(id, accountUsername)
   );
+}
+
+async function canManageProject(projectId, managerUsername) {
+  const project = await getProjectById(projectId);
+  return isProjectManagedBy(project, managerUsername);
+}
+
+function isProjectManagedBy(project, managerUsername) {
+  return Boolean(project && cleanText(project.managerUsername).toLowerCase() === cleanText(managerUsername).toLowerCase());
 }
 
 async function replaceProjectAccess(projectId, managerUsername, usernames) {
@@ -1287,7 +1548,8 @@ function readProjectBody(body) {
     projectCosts: cleanText(body.projectCosts),
     contractors: cleanText(body.contractors),
     locationSite: cleanText(body.locationSite),
-    projectCode: cleanText(body.projectCode).toUpperCase()
+    projectCode: cleanText(body.projectCode).toUpperCase(),
+    managerUsername: cleanText(body.managerUsername).toLowerCase()
   };
 }
 
@@ -1342,6 +1604,7 @@ function mapProject(project) {
     contractors: project.contractors || "",
     locationSite: project.locationSite || project.location_site || "",
     projectCode: project.projectCode || project.project_code || "",
+    managerUsername: project.managerUsername || project.manager_username || "",
     createdAt: project.createdAt || project.created_at || ""
   };
 }
