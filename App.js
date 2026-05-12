@@ -1330,6 +1330,9 @@ export default function App() {
 
   return (
     <AppFrame>
+      <HoverPressable style={styles.topLogoutButton} onPress={logout}>
+        <Feather name="log-out" size={18} color="#111827" />
+      </HoverPressable>
       <ScrollView contentContainerStyle={styles.dashboard} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
           <View style={styles.headerTextBlock}>
@@ -1377,9 +1380,6 @@ export default function App() {
                 <Feather name="settings" size={18} color="#111827" />
               </HoverPressable>
             )}
-            <HoverPressable style={styles.headerIconButton} onPress={logout}>
-              <Feather name="log-out" size={18} color="#111827" />
-            </HoverPressable>
           </View>
         </View>
 
@@ -3219,7 +3219,8 @@ const styles = StyleSheet.create({
   },
   dashboard: {
     padding: 18,
-    paddingBottom: 34
+    paddingBottom: 34,
+    paddingTop: 72
   },
   header: {
     alignItems: "flex-start",
@@ -3254,6 +3255,20 @@ const styles = StyleSheet.create({
     height: 44,
     justifyContent: "center",
     width: 44
+  },
+  topLogoutButton: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: "center",
+    position: "absolute",
+    right: 18,
+    top: 14,
+    width: 44,
+    zIndex: 20
   },
   statsRow: {
     flexDirection: "row",
