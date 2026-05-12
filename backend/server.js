@@ -74,7 +74,9 @@ app.get("/accounts/managers", async (req, res) => {
 });
 
 app.get("/projects", async (req, res) => {
-  res.json({ projects: await getProjects() });
+  const username = cleanText(req.query.username).toLowerCase();
+  const role = cleanText(req.query.role);
+  res.json({ projects: await getProjectsForUser(username, role) });
 });
 
 app.post("/projects", async (req, res) => {
@@ -95,8 +97,48 @@ app.post("/projects", async (req, res) => {
   return res.status(201).json({ project: await getProjectById(id) });
 });
 
+app.get("/projects/:id/access", async (req, res) => {
+  const projectId = cleanText(req.params.id);
+  const managerUsername = cleanText(req.query.managerUsername).toLowerCase();
+
+  if (!(await getProjectById(projectId))) {
+    return res.status(404).json({ error: "Project not found." });
+  }
+
+  if (!managerUsername) {
+    return res.status(400).json({ error: "Manager username is required." });
+  }
+
+  return res.json({ users: await getProjectAccessUsers(projectId, managerUsername) });
+});
+
+app.put("/projects/:id/access", async (req, res) => {
+  const projectId = cleanText(req.params.id);
+  const managerUsername = cleanText(req.body.managerUsername).toLowerCase();
+  const usernames = readUsernameList(req.body.usernames);
+
+  if (!(await getProjectById(projectId))) {
+    return res.status(404).json({ error: "Project not found." });
+  }
+
+  if (!managerUsername) {
+    return res.status(400).json({ error: "Manager username is required." });
+  }
+
+  await replaceProjectAccess(projectId, managerUsername, usernames);
+  return res.json({ users: await getProjectAccessUsers(projectId, managerUsername) });
+});
+
 app.get("/requisitions", async (req, res) => {
-  res.json({ requisitions: await getRequisitions(cleanText(req.query.projectId)) });
+  const projectId = cleanText(req.query.projectId);
+  const username = cleanText(req.query.username).toLowerCase();
+  const role = cleanText(req.query.role);
+
+  if (projectId && username && !(await canAccessProject(projectId, username, role))) {
+    return res.status(403).json({ error: "You do not have access to this project." });
+  }
+
+  res.json({ requisitions: await getRequisitions(projectId) });
 });
 
 app.post("/requisitions", async (req, res) => {
@@ -109,6 +151,13 @@ app.post("/requisitions", async (req, res) => {
 
   if (!(await getProjectById(requisition.projectId))) {
     return res.status(400).json({ error: "Select a valid project before creating a requisition." });
+  }
+
+  const accessUsername = cleanText(req.body.accessUsername).toLowerCase();
+  const accessRole = cleanText(req.body.accessRole);
+
+  if (accessUsername && !(await canAccessProject(requisition.projectId, accessUsername, accessRole))) {
+    return res.status(403).json({ error: "You do not have access to this project." });
   }
 
   const id = await getNextRequisitionId();
@@ -259,6 +308,9 @@ app.post("/accounts", async (req, res) => {
   }
 
   await createAccount(account);
+  if (account.role !== "Manager") {
+    await grantProjectAccess("sample", account.username, account.managerUsername);
+  }
   return res.status(201).json({ account: await getAccountByUsername(account.username) });
 });
 
@@ -385,6 +437,14 @@ async function initializeDatabase() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS project_members (
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        username TEXT NOT NULL,
+        manager_username TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (project_id, username)
+      );
+
       CREATE TABLE IF NOT EXISTS requisitions (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL DEFAULT 'sample' REFERENCES projects(id),
@@ -420,6 +480,8 @@ async function initializeDatabase() {
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_remarks TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT 'sample'");
     await pgPool.query("CREATE INDEX IF NOT EXISTS requisitions_project_id_idx ON requisitions(project_id)");
+    await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_username_idx ON project_members(username)");
+    await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_manager_idx ON project_members(manager_username)");
   } else {
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
@@ -452,6 +514,14 @@ async function initializeDatabase() {
         projectCode TEXT NOT NULL UNIQUE,
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS project_members (
+        projectId TEXT NOT NULL,
+        username TEXT NOT NULL,
+        managerUsername TEXT NOT NULL DEFAULT '',
+        createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (projectId, username)
       );
 
       CREATE TABLE IF NOT EXISTS requisitions (
@@ -490,10 +560,13 @@ async function initializeDatabase() {
     addSqliteColumnIfMissing("requisitions", "deliveryRemarks", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "projectId", "TEXT NOT NULL DEFAULT 'sample'");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS requisitionsProjectIdIndex ON requisitions(projectId);");
+    sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersUsernameIndex ON project_members(username);");
+    sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersManagerIndex ON project_members(managerUsername);");
   }
 
   await seedAccounts();
   await seedProjects();
+  await seedProjectAccess();
   await seedRequisitions();
   await migrateProcurementStatuses();
 }
@@ -537,6 +610,18 @@ async function seedProjects() {
     locationSite: "",
     projectCode: "SAMPLE"
   });
+}
+
+async function seedProjectAccess() {
+  if ((await getCount("project_members")) > 0) {
+    return;
+  }
+
+  const accounts = (await getAccounts()).filter((account) => account.role !== "Manager");
+
+  for (const account of accounts) {
+    await grantProjectAccess("sample", account.username, account.managerUsername);
+  }
 }
 
 async function seedRequisitions() {
@@ -598,6 +683,37 @@ async function getProjects() {
   }
 
   return sqliteDb.prepare("SELECT * FROM projects ORDER BY createdAt ASC, title ASC").all().map(mapProject);
+}
+
+async function getProjectsForUser(username, role) {
+  const normalizedUsername = cleanText(username).toLowerCase();
+
+  if (!normalizedUsername || role === "Manager") {
+    return getProjects();
+  }
+
+  if (usePostgres) {
+    const result = await pgPool.query(
+      `SELECT DISTINCT p.*
+       FROM projects p
+       INNER JOIN project_members pm ON pm.project_id = p.id
+       WHERE lower(pm.username) = $1
+       ORDER BY p.created_at ASC, p.title ASC`,
+      [normalizedUsername]
+    );
+    return result.rows.map(mapProject);
+  }
+
+  return sqliteDb
+    .prepare(
+      `SELECT DISTINCT p.*
+       FROM projects p
+       INNER JOIN project_members pm ON pm.projectId = p.id
+       WHERE lower(pm.username) = ?
+       ORDER BY p.createdAt ASC, p.title ASC`
+    )
+    .all(normalizedUsername)
+    .map(mapProject);
 }
 
 async function getProjectById(id) {
@@ -678,6 +794,132 @@ async function createProject(id, project) {
       project.locationSite,
       project.projectCode
     );
+}
+
+async function getProjectAccessUsers(projectId, managerUsername) {
+  const managedAccounts = await getAccountsManagedBy(managerUsername);
+  const accessUsernames = await getProjectAccessUsernames(projectId);
+  const accessSet = new Set(accessUsernames.map((username) => username.toLowerCase()));
+
+  return managedAccounts.map((account) => ({
+    ...account,
+    hasAccess: accessSet.has(account.username.toLowerCase())
+  }));
+}
+
+async function getAccountsManagedBy(managerUsername) {
+  const username = cleanText(managerUsername).toLowerCase();
+
+  if (usePostgres) {
+    const result = await pgPool.query(
+      `SELECT * FROM accounts
+       WHERE lower(manager_username) = $1 AND role <> 'Manager'
+       ORDER BY role, first_name, last_name`,
+      [username]
+    );
+    return result.rows.map(mapAccount);
+  }
+
+  return sqliteDb
+    .prepare(
+      `SELECT * FROM accounts
+       WHERE lower(managerUsername) = ? AND role <> 'Manager'
+       ORDER BY role, firstName, lastName`
+    )
+    .all(username)
+    .map(mapAccount);
+}
+
+async function getProjectAccessUsernames(projectId) {
+  const id = cleanText(projectId);
+
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT username FROM project_members WHERE project_id = $1", [id]);
+    return result.rows.map((row) => row.username);
+  }
+
+  return sqliteDb
+    .prepare("SELECT username FROM project_members WHERE projectId = ?")
+    .all(id)
+    .map((row) => row.username);
+}
+
+async function canAccessProject(projectId, username, role) {
+  const id = cleanText(projectId);
+  const accountUsername = cleanText(username).toLowerCase();
+
+  if (!id || !accountUsername || role === "Manager") {
+    return true;
+  }
+
+  if (usePostgres) {
+    const result = await pgPool.query(
+      "SELECT 1 FROM project_members WHERE project_id = $1 AND lower(username) = $2 LIMIT 1",
+      [id, accountUsername]
+    );
+    return result.rowCount > 0;
+  }
+
+  return Boolean(
+    sqliteDb
+      .prepare("SELECT 1 FROM project_members WHERE projectId = ? AND lower(username) = ? LIMIT 1")
+      .get(id, accountUsername)
+  );
+}
+
+async function replaceProjectAccess(projectId, managerUsername, usernames) {
+  const id = cleanText(projectId);
+  const manager = cleanText(managerUsername).toLowerCase();
+  const managedAccounts = await getAccountsManagedBy(manager);
+  const managedSet = new Set(managedAccounts.map((account) => account.username.toLowerCase()));
+  const selectedUsernames = [...new Set(usernames.map((username) => cleanText(username).toLowerCase()))].filter((username) =>
+    managedSet.has(username)
+  );
+
+  if (usePostgres) {
+    await pgPool.query("DELETE FROM project_members WHERE project_id = $1 AND lower(manager_username) = $2", [id, manager]);
+
+    for (const username of selectedUsernames) {
+      await grantProjectAccess(id, username, manager);
+    }
+    return;
+  }
+
+  sqliteDb.prepare("DELETE FROM project_members WHERE projectId = ? AND lower(managerUsername) = ?").run(id, manager);
+
+  for (const username of selectedUsernames) {
+    await grantProjectAccess(id, username, manager);
+  }
+}
+
+async function grantProjectAccess(projectId, username, managerUsername) {
+  const id = cleanText(projectId);
+  const accountUsername = cleanText(username).toLowerCase();
+  const manager = cleanText(managerUsername).toLowerCase();
+
+  if (!id || !accountUsername) {
+    return;
+  }
+
+  if (usePostgres) {
+    await pgPool.query(
+      `INSERT INTO project_members (project_id, username, manager_username)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (project_id, username)
+       DO UPDATE SET manager_username = EXCLUDED.manager_username`,
+      [id, accountUsername, manager]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `INSERT INTO project_members (projectId, username, managerUsername)
+       VALUES (?, ?, ?)
+       ON CONFLICT(projectId, username)
+       DO UPDATE SET managerUsername = excluded.managerUsername`
+    )
+    .run(id, accountUsername, manager);
 }
 
 async function migrateProcurementStatuses() {
@@ -1047,6 +1289,14 @@ function readProjectBody(body) {
     locationSite: cleanText(body.locationSite),
     projectCode: cleanText(body.projectCode).toUpperCase()
   };
+}
+
+function readUsernameList(usernames) {
+  if (!Array.isArray(usernames)) {
+    return [];
+  }
+
+  return usernames.map((username) => cleanText(username).toLowerCase()).filter(Boolean);
 }
 
 function readChangedBy(body) {

@@ -44,7 +44,7 @@ const ROLES = [
 
 const PERMISSIONS = {
   Manager: { add: true, edit: true, remove: true, status: true },
-  Procurement: { add: false, edit: false, remove: false, status: true },
+  Procurement: { add: true, edit: false, remove: false, status: true },
   Engineer: { add: true, edit: true, remove: true, status: false },
   Staff: { add: true, edit: true, remove: false, status: false }
 };
@@ -190,6 +190,10 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState("sample");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
   const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
+  const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+  const [projectAccessUsers, setProjectAccessUsers] = useState([]);
+  const [isProjectAccessLoading, setIsProjectAccessLoading] = useState(false);
+  const [isProjectAccessSaving, setIsProjectAccessSaving] = useState(false);
   const [projectForm, setProjectForm] = useState(EMPTY_PROJECT_FORM);
   const [items, setItems] = useState(INITIAL_ITEMS);
   const [query, setQuery] = useState("");
@@ -220,14 +224,19 @@ export default function App() {
 
   useEffect(() => {
     loadAccounts();
-    loadProjects();
   }, []);
 
   useEffect(() => {
-    if (selectedProjectId) {
+    if (user) {
+      loadProjects(user);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (user && selectedProjectId) {
       loadItems(selectedProjectId);
     }
-  }, [selectedProjectId]);
+  }, [user, selectedProjectId]);
 
   useEffect(() => {
     if (otpCooldownSeconds <= 0) {
@@ -288,6 +297,11 @@ export default function App() {
   };
 
   const saveItem = async () => {
+    if (!selectedProjectId) {
+      Alert.alert("Project required", "Select an accessible project before creating a requisition.");
+      return;
+    }
+
     if (!form.item.trim() || !form.quantity.trim() || !form.requestedBy.trim() || !form.chargeTo.trim()) {
       Alert.alert("Missing information", "Item, quantity, requested by, and charge to are required.");
       return;
@@ -302,6 +316,8 @@ export default function App() {
           body: JSON.stringify({
             ...form,
             projectId: selectedProjectId,
+            accessUsername: user?.username || "",
+            accessRole: user?.role || "",
             changedBy: getEditorName(user)
           })
         }
@@ -436,15 +452,21 @@ export default function App() {
     }
   };
 
-  const loadProjects = async () => {
+  const loadProjects = async (account = user) => {
     try {
-      const response = await fetch(`${OTP_API_URL}/projects`);
+      const queryString = account
+        ? `?username=${encodeURIComponent(account.username)}&role=${encodeURIComponent(account.role)}`
+        : "";
+      const response = await fetch(`${OTP_API_URL}/projects${queryString}`);
       const result = await response.json();
 
-      if (response.ok && Array.isArray(result.projects) && result.projects.length > 0) {
+      if (response.ok && Array.isArray(result.projects)) {
         setProjects(result.projects);
 
-        if (!result.projects.some((project) => project.id === selectedProjectId)) {
+        if (result.projects.length === 0) {
+          setSelectedProjectId("");
+          setItems([]);
+        } else if (!result.projects.some((project) => project.id === selectedProjectId)) {
           setSelectedProjectId(result.projects[0].id);
         }
       }
@@ -455,7 +477,18 @@ export default function App() {
 
   const loadItems = async (projectId = selectedProjectId) => {
     try {
-      const queryString = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+      const params = [];
+
+      if (projectId) {
+        params.push(`projectId=${encodeURIComponent(projectId)}`);
+      }
+
+      if (user) {
+        params.push(`username=${encodeURIComponent(user.username)}`);
+        params.push(`role=${encodeURIComponent(user.role)}`);
+      }
+
+      const queryString = params.length > 0 ? `?${params.join("&")}` : "";
       const response = await fetch(`${OTP_API_URL}/requisitions${queryString}`);
       const result = await response.json();
 
@@ -481,7 +514,10 @@ export default function App() {
       const response = await fetch(`${OTP_API_URL}/projects`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(projectForm)
+        body: JSON.stringify({
+          ...projectForm,
+          managerUsername: user?.username || ""
+        })
       });
       const result = await response.json();
 
@@ -498,6 +534,84 @@ export default function App() {
       setItems([]);
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    }
+  };
+
+  const openProjectSettings = () => {
+    if (!selectedProjectId) {
+      Alert.alert("No project selected", "Select a project before opening settings.");
+      return;
+    }
+
+    setIsProjectSettingsOpen(true);
+    loadProjectAccess(selectedProjectId);
+  };
+
+  const loadProjectAccess = async (projectId = selectedProjectId) => {
+    if (!projectId || user?.role !== "Manager") {
+      return;
+    }
+
+    setIsProjectAccessLoading(true);
+
+    try {
+      const response = await fetch(
+        `${OTP_API_URL}/projects/${encodeURIComponent(projectId)}/access?managerUsername=${encodeURIComponent(user.username)}`
+      );
+      const result = await response.json();
+
+      if (response.ok && Array.isArray(result.users)) {
+        setProjectAccessUsers(result.users);
+      } else {
+        Alert.alert("Settings unavailable", result.error || "The backend could not load project access.");
+      }
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsProjectAccessLoading(false);
+    }
+  };
+
+  const toggleProjectAccess = (username) => {
+    setProjectAccessUsers((current) =>
+      current.map((account) =>
+        account.username === username ? { ...account, hasAccess: !account.hasAccess } : account
+      )
+    );
+  };
+
+  const saveProjectAccess = async () => {
+    if (!selectedProjectId || user?.role !== "Manager") {
+      return;
+    }
+
+    setIsProjectAccessSaving(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/projects/${encodeURIComponent(selectedProjectId)}/access`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          managerUsername: user.username,
+          usernames: projectAccessUsers.filter((account) => account.hasAccess).map((account) => account.username)
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Settings not saved", result.error || "The backend could not save project access.");
+        return;
+      }
+
+      if (Array.isArray(result.users)) {
+        setProjectAccessUsers(result.users);
+      }
+
+      setIsProjectSettingsOpen(false);
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsProjectAccessSaving(false);
     }
   };
 
@@ -533,7 +647,6 @@ export default function App() {
       }
 
       setUser(result.account);
-      loadItems();
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
       return;
@@ -549,6 +662,13 @@ export default function App() {
     setPassword("");
     setQuery("");
     setStatusFilter("All");
+    setProjects(INITIAL_PROJECTS);
+    setSelectedProjectId("sample");
+    setItems(INITIAL_ITEMS);
+    setIsProjectMenuOpen(false);
+    setIsProjectFormOpen(false);
+    setIsProjectSettingsOpen(false);
+    setProjectAccessUsers([]);
   };
 
   const exportAllRequisitions = async () => {
@@ -930,11 +1050,12 @@ export default function App() {
             </Text>
           </View>
           <View style={styles.headerActions}>
-            {user.role === "Manager" && (
+            {projects.length > 0 && (
               <ProjectDropdown
                 projects={projects}
                 selectedProjectId={selectedProjectId}
                 visible={isProjectMenuOpen}
+                canCreate={user.role === "Manager"}
                 onOpen={() => setIsProjectMenuOpen(true)}
                 onClose={() => setIsProjectMenuOpen(false)}
                 onSelect={(projectId) => {
@@ -954,6 +1075,11 @@ export default function App() {
             <HoverPressable style={styles.headerIconButton} onPress={shareAllRequisitions}>
               <Feather name="share-2" size={18} color="#111827" />
             </HoverPressable>
+            {user.role === "Manager" && (
+              <HoverPressable style={styles.headerIconButton} onPress={openProjectSettings}>
+                <Feather name="settings" size={18} color="#111827" />
+              </HoverPressable>
+            )}
             <HoverPressable style={styles.headerIconButton} onPress={logout}>
               <Feather name="log-out" size={18} color="#111827" />
             </HoverPressable>
@@ -1065,6 +1191,17 @@ export default function App() {
           setIsProjectFormOpen(false);
         }}
         onSave={saveProject}
+      />
+
+      <ProjectSettingsModal
+        visible={isProjectSettingsOpen}
+        project={selectedProject}
+        users={projectAccessUsers}
+        isLoading={isProjectAccessLoading}
+        isSaving={isProjectAccessSaving}
+        onToggle={toggleProjectAccess}
+        onClose={() => setIsProjectSettingsOpen(false)}
+        onSave={saveProjectAccess}
       />
 
       <RequisitionDetailModal
@@ -1432,7 +1569,7 @@ function SortViewDropdown({ visible, sortOrder, viewMode, onOpen, onClose, onSor
   );
 }
 
-function ProjectDropdown({ projects, selectedProjectId, visible, onOpen, onClose, onSelect, onCreate }) {
+function ProjectDropdown({ projects, selectedProjectId, visible, canCreate = false, onOpen, onClose, onSelect, onCreate }) {
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
 
   return (
@@ -1479,10 +1616,12 @@ function ProjectDropdown({ projects, selectedProjectId, visible, onOpen, onClose
               </View>
             </ScrollView>
 
-            <HoverPressable style={styles.primaryButton} onPress={onCreate}>
-              <Text style={styles.primaryButtonText}>Add new project</Text>
-              <Feather name="plus" size={18} color="#ffffff" />
-            </HoverPressable>
+            {canCreate && (
+              <HoverPressable style={styles.primaryButton} onPress={onCreate}>
+                <Text style={styles.primaryButtonText}>Add new project</Text>
+                <Feather name="plus" size={18} color="#ffffff" />
+              </HoverPressable>
+            )}
           </View>
         </View>
       </Modal>
@@ -1756,6 +1895,73 @@ function RequisitionDetailModal({ visible, item, project, onClose }) {
               <Text style={styles.secondaryButtonText}>Share</Text>
             </HoverPressable>
           </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ProjectSettingsModal({ visible, project, users, isLoading, isSaving, onToggle, onClose, onSave }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalPanel}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalTitleBlock}>
+              <Text style={styles.kicker}>Project settings</Text>
+              <Text style={styles.modalTitle}>{project?.title || "Project access"}</Text>
+            </View>
+            <HoverPressable style={styles.iconButton} onPress={onClose}>
+              <Feather name="x" size={20} color="#111827" />
+            </HoverPressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
+            <Text style={styles.sectionLabel}>Project access</Text>
+
+            {isLoading ? (
+              <View style={styles.loadingPanel}>
+                <ActivityIndicator color="#111827" />
+                <Text style={styles.loadingText}>Loading users</Text>
+              </View>
+            ) : users.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Feather name="users" size={28} color="#9ca3af" />
+                <Text style={styles.emptyTitle}>No users under your account</Text>
+                <Text style={styles.emptyText}>Approved users will appear here after sign-up.</Text>
+              </View>
+            ) : (
+              <View style={styles.managerList}>
+                {users.map((account) => (
+                  <HoverPressable
+                    key={account.username}
+                    style={[styles.managerOption, account.hasAccess && styles.managerOptionActive]}
+                    onPress={() => onToggle(account.username)}
+                    disabled={isSaving}
+                  >
+                    <View style={styles.managerOptionText}>
+                      <Text style={styles.managerName}>{getAccountName(account)}</Text>
+                      <Text style={styles.managerEmail}>{account.role} - {account.email}</Text>
+                    </View>
+                    <Feather
+                      name={account.hasAccess ? "check-square" : "square"}
+                      size={20}
+                      color={account.hasAccess ? "#047857" : "#64748b"}
+                    />
+                  </HoverPressable>
+                ))}
+              </View>
+            )}
+          </ScrollView>
+
+          <HoverPressable
+            style={[styles.primaryButton, (isSaving || isLoading) && styles.disabledButton]}
+            onPress={onSave}
+            disabled={isSaving || isLoading}
+          >
+            <Text style={styles.primaryButtonText}>{isSaving ? "Saving..." : "Save settings"}</Text>
+            <Feather name="check" size={18} color="#ffffff" />
+          </HoverPressable>
         </View>
       </View>
     </Modal>
@@ -3163,6 +3369,20 @@ const styles = StyleSheet.create({
     color: "#64748b",
     fontSize: 14,
     marginTop: 4
+  },
+  loadingPanel: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 10,
+    padding: 24
+  },
+  loadingText: {
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: "800"
   },
   modalOverlay: {
     backgroundColor: "rgba(17, 24, 39, 0.36)",
