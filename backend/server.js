@@ -13,6 +13,7 @@ const otpExpiresMinutes = Number(process.env.OTP_EXPIRES_MINUTES || 10);
 const managerStatusOptions = ["Draft", "Submitted", "Review", "Approved", "Ordered", "Received", "Rejected"];
 const procurementStatusOptions = ["Purchased", "Delivered", "On-Bidding", "For Quotation", "Under Cost Control"];
 const statusOptions = [...managerStatusOptions, ...procurementStatusOptions];
+const contactInquiryOptions = ["Pricing (Negotiation)", "Information", "Instruction", "Manual"];
 const pendingCodes = new Map();
 const usePostgres = Boolean(process.env.DATABASE_URL);
 const resendApiUrl = "https://api.resend.com/emails";
@@ -403,6 +404,67 @@ app.post("/password-reset/confirm", async (req, res) => {
   await updateAccountPassword(username, password);
   pendingCodes.set(key, { ...savedCode, used: true });
   return res.json({ ok: true });
+});
+
+app.post("/contact/request", async (req, res) => {
+  const contact = {
+    fullName: cleanText(req.body.fullName),
+    email: normalizeEmail(req.body.email),
+    phoneNumber: cleanText(req.body.phoneNumber),
+    company: cleanText(req.body.company),
+    inquiry: cleanText(req.body.inquiry),
+    details: cleanText(req.body.details)
+  };
+
+  if (
+    !contact.fullName ||
+    !contact.email ||
+    !contact.phoneNumber ||
+    !contact.company ||
+    !contact.inquiry ||
+    !contact.details
+  ) {
+    return res.status(400).json({ error: "Full name, email, phone number, company, inquiry, and details are required." });
+  }
+
+  if (!contactInquiryOptions.includes(contact.inquiry)) {
+    return res.status(400).json({ error: "Select a valid inquiry type." });
+  }
+
+  if (!getEmailProvider()) {
+    return res.status(500).json({ error: "No email provider is configured on the backend." });
+  }
+
+  try {
+    await sendAppEmail({
+      to: creatorEmail,
+      subject: `Contact inquiry: ${contact.inquiry}`,
+      messageText: [
+        "A user submitted a contact inquiry from the requisition app.",
+        "",
+        `Full name: ${contact.fullName}`,
+        `Email: ${contact.email}`,
+        `Phone number: ${contact.phoneNumber}`,
+        `Company: ${contact.company}`,
+        `Inquiry type: ${contact.inquiry}`,
+        "",
+        "Details:",
+        contact.details
+      ].join("\n")
+    });
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("Failed to send contact inquiry:", {
+      provider: error?.provider,
+      status: error?.status,
+      code: error?.code,
+      command: error?.command,
+      responseCode: error?.responseCode,
+      message: error?.message
+    });
+    return res.status(502).json({ error: getMailErrorMessage(error) });
+  }
 });
 
 app.post("/manager-access/request", async (req, res) => {

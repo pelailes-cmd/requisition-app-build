@@ -147,6 +147,7 @@ const MANAGER_ACCESS_PRICE = "3,500 Pesos";
 const MAYA_QR_IMAGE_URL = process.env.EXPO_PUBLIC_MAYA_QR_IMAGE_URL || "";
 const MAYA_QR_DISPLAY_NAME = process.env.EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME || "Construction Apps";
 const MAYA_QR_IMAGE_SOURCE = MAYA_QR_IMAGE_URL ? { uri: MAYA_QR_IMAGE_URL } : require("./assets/maya-qr.png");
+const CONTACT_INQUIRY_OPTIONS = ["Pricing (Negotiation)", "Information", "Instruction", "Manual"];
 
 const INITIAL_ACCOUNTS = [
   {
@@ -201,6 +202,15 @@ const EMPTY_MANAGER_PROFILE_FORM = {
   company: ""
 };
 
+const EMPTY_CONTACT_FORM = {
+  fullName: "",
+  email: "",
+  phoneNumber: "",
+  company: "",
+  inquiry: CONTACT_INQUIRY_OPTIONS[0],
+  details: ""
+};
+
 const OTP_REQUEST_COOLDOWN_SECONDS = 60;
 
 export default function App() {
@@ -228,6 +238,9 @@ export default function App() {
   const [managerProfileForm, setManagerProfileForm] = useState(EMPTY_MANAGER_PROFILE_FORM);
   const [showManagerProfilePassword, setShowManagerProfilePassword] = useState(false);
   const [isManagerProfileSaving, setIsManagerProfileSaving] = useState(false);
+  const [isContactOpen, setIsContactOpen] = useState(false);
+  const [contactForm, setContactForm] = useState(EMPTY_CONTACT_FORM);
+  const [isContactSending, setIsContactSending] = useState(false);
   const [projects, setProjects] = useState(INITIAL_PROJECTS);
   const [selectedProjectId, setSelectedProjectId] = useState("sample");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -337,6 +350,7 @@ export default function App() {
     if (isPasswordResetSaving) return "Updating password";
     if (isManagerAccessSending) return "Submitting payment review";
     if (isManagerProfileSaving) return "Saving Manager profile";
+    if (isContactSending) return "Sending inquiry";
     if (isRefreshLoading) return "Refreshing workspace";
     if (isItemSaving) return editingItem ? "Saving request" : "Creating request";
     if (isProjectSaving) return "Saving project";
@@ -351,6 +365,7 @@ export default function App() {
     isPasswordResetSaving,
     isManagerAccessSending,
     isManagerProfileSaving,
+    isContactSending,
     isRefreshLoading,
     isItemSaving,
     editingItem,
@@ -808,6 +823,8 @@ export default function App() {
     setPasswordResetForm(EMPTY_PASSWORD_RESET_FORM);
     setManagerProfileForm(EMPTY_MANAGER_PROFILE_FORM);
     setShowManagerProfilePassword(false);
+    setContactForm(EMPTY_CONTACT_FORM);
+    setIsContactOpen(false);
     setQuery("");
     setStatusFilter("All");
     setProjects(INITIAL_PROJECTS);
@@ -851,6 +868,10 @@ export default function App() {
 
   const updateManagerProfileField = (field, value) => {
     setManagerProfileForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const updateContactField = (field, value) => {
+    setContactForm((current) => ({ ...current, [field]: value }));
   };
 
   const openManagerAccessFromSignup = () => {
@@ -1114,6 +1135,50 @@ export default function App() {
     }
   };
 
+  const submitContactRequest = async () => {
+    if (isContactSending) {
+      return;
+    }
+
+    const contact = {
+      fullName: contactForm.fullName.trim(),
+      email: contactForm.email.trim().toLowerCase(),
+      phoneNumber: contactForm.phoneNumber.trim(),
+      company: contactForm.company.trim(),
+      inquiry: contactForm.inquiry,
+      details: contactForm.details.trim()
+    };
+
+    if (!contact.fullName || !contact.email || !contact.phoneNumber || !contact.company || !contact.inquiry || !contact.details) {
+      Alert.alert("Missing information", "Complete all contact fields before sending your inquiry.");
+      return;
+    }
+
+    setIsContactSending(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/contact/request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(contact)
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Inquiry not sent", result.error || "The backend could not send your inquiry.");
+        return;
+      }
+
+      setContactForm(EMPTY_CONTACT_FORM);
+      setIsContactOpen(false);
+      Alert.alert("Inquiry sent", "Your message was sent to the app creator.");
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsContactSending(false);
+    }
+  };
+
   const signup = async () => {
     if (isSignupLoading) {
       return;
@@ -1293,6 +1358,10 @@ export default function App() {
               <HoverPressable style={styles.textButton} onPress={() => setIsManagerAccessOpen(true)}>
                 <Feather name="send" size={16} color="#2563eb" />
                 <Text style={styles.textButtonText}>Request Access</Text>
+              </HoverPressable>
+              <HoverPressable style={styles.textButton} onPress={() => setIsContactOpen(true)}>
+                <Feather name="mail" size={16} color="#2563eb" />
+                <Text style={styles.textButtonText}>Contact Us for Pricing, Information, Instructions, and Manual</Text>
               </HoverPressable>
               <HoverPressable
                 style={[styles.primaryButton, isLoginLoading && styles.disabledButton]}
@@ -1526,6 +1595,14 @@ export default function App() {
           onChange={updateManagerAccessField}
           onClose={() => setIsManagerAccessOpen(false)}
           onSubmit={submitManagerAccessRequest}
+        />
+        <ContactRequestModal
+          visible={isContactOpen}
+          form={contactForm}
+          isSending={isContactSending}
+          onChange={updateContactField}
+          onClose={() => setIsContactOpen(false)}
+          onSubmit={submitContactRequest}
         />
         <LoadingOverlay visible={!!loadingMessage} message={loadingMessage} />
       </AppFrame>
@@ -2536,6 +2613,126 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
         </View>
       </View>
     </Modal>
+  );
+}
+
+function ContactRequestModal({ visible, form, isSending, onChange, onClose, onSubmit }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalPanel}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalTitleBlock}>
+              <Text style={styles.kicker}>Contact</Text>
+              <Text style={styles.modalTitle}>Contact Us</Text>
+            </View>
+            <HoverPressable style={styles.iconButton} onPress={onClose}>
+              <Feather name="x" size={20} color="#111827" />
+            </HoverPressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
+            <TextInput
+              placeholder="Full name (e.g. Juan Dela Cruz)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.fullName}
+              onChangeText={(value) => onChange("fullName", value)}
+            />
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="Email (e.g. juan.delacruz@email.com)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.email}
+              onChangeText={(value) => onChange("email", value)}
+            />
+            <TextInput
+              keyboardType="phone-pad"
+              placeholder="Phone number (e.g. 09171234567)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.phoneNumber}
+              onChangeText={(value) => onChange("phoneNumber", value)}
+            />
+            <TextInput
+              placeholder="Company (e.g. Ailes Construction)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.company}
+              onChangeText={(value) => onChange("company", value)}
+            />
+            <InquiryDropdown
+              selectedInquiry={form.inquiry}
+              onSelect={(inquiry) => onChange("inquiry", inquiry)}
+            />
+            <TextInput
+              multiline
+              textAlignVertical="top"
+              placeholder="Details of your inquiry"
+              placeholderTextColor="#9ca3af"
+              style={[styles.input, styles.textarea]}
+              value={form.details}
+              onChangeText={(value) => onChange("details", value)}
+            />
+          </ScrollView>
+
+          <HoverPressable
+            style={[styles.primaryButton, isSending && styles.disabledButton]}
+            onPress={onSubmit}
+            disabled={isSending}
+          >
+            <Text style={styles.primaryButtonText}>{isSending ? "Sending..." : "Send inquiry"}</Text>
+            <Feather name="mail" size={18} color="#ffffff" />
+          </HoverPressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function InquiryDropdown({ selectedInquiry, onSelect }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <>
+      <HoverPressable style={styles.dropdownButton} onPress={() => setIsOpen(true)}>
+        <View style={styles.dropdownTextBlock}>
+          <Text style={styles.sectionLabel}>Inquiry</Text>
+          <Text style={styles.dropdownValue}>{selectedInquiry}</Text>
+        </View>
+        <Feather name="chevron-down" size={20} color="#111827" />
+      </HoverPressable>
+
+      <Modal visible={isOpen} animationType="fade" transparent onRequestClose={() => setIsOpen(false)}>
+        <View style={styles.dropdownOverlay}>
+          <View style={styles.dropdownPanel}>
+            <View style={styles.dropdownHeader}>
+              <Text style={styles.modalTitle}>Inquiry type</Text>
+              <HoverPressable style={styles.iconButton} onPress={() => setIsOpen(false)}>
+                <Feather name="x" size={20} color="#111827" />
+              </HoverPressable>
+            </View>
+            <View style={styles.formStack}>
+              {CONTACT_INQUIRY_OPTIONS.map((inquiry) => (
+                <HoverPressable
+                  key={inquiry}
+                  style={[styles.managerOption, selectedInquiry === inquiry && styles.managerOptionActive]}
+                  onPress={() => {
+                    onSelect(inquiry);
+                    setIsOpen(false);
+                  }}
+                >
+                  <Text style={styles.managerName}>{inquiry}</Text>
+                  {selectedInquiry === inquiry && <Feather name="check" size={18} color="#2563eb" />}
+                </HoverPressable>
+              ))}
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -4096,7 +4293,7 @@ const styles = StyleSheet.create({
     fontWeight: "800"
   },
   textButton: {
-    alignItems: "center",
+    alignItems: "flex-start",
     alignSelf: "flex-start",
     flexDirection: "row",
     gap: 7,
@@ -4105,8 +4302,10 @@ const styles = StyleSheet.create({
   },
   textButtonText: {
     color: "#2563eb",
+    flexShrink: 1,
     fontSize: 14,
-    fontWeight: "800"
+    fontWeight: "800",
+    lineHeight: 20
   },
   promptText: {
     backgroundColor: "#ffffff",
