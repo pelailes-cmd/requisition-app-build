@@ -470,6 +470,10 @@ app.post("/accounts", async (req, res) => {
     role: cleanText(req.body.role)
   };
 
+  if (account.role === "Manager") {
+    return res.status(403).json({ error: "Manager access requires creator approval. Use Request Access." });
+  }
+
   if (
     !account.username ||
     !account.password ||
@@ -514,6 +518,10 @@ app.post("/otp/request", async (req, res) => {
   const managerUsername = cleanText(req.body.managerUsername);
   const managerEmail = normalizeEmail(req.body.managerEmail);
   const managerName = cleanText(req.body.managerName) || "Manager";
+
+  if (role === "Manager") {
+    return res.status(403).json({ error: "Manager access requires creator approval. Use Request Access." });
+  }
 
   if (!email || !role || !managerUsername || !managerEmail) {
     return res.status(400).json({ error: "Missing email, role, or manager information." });

@@ -819,6 +819,20 @@ export default function App() {
     setManagerAccessForm((current) => ({ ...current, [field]: value }));
   };
 
+  const openManagerAccessFromSignup = () => {
+    const fullName = [signupForm.firstName, signupForm.middleName, signupForm.lastName]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(" ");
+
+    setManagerAccessForm((current) => ({
+      ...current,
+      fullName: current.fullName || fullName,
+      email: current.email || signupForm.email.trim().toLowerCase()
+    }));
+    setIsManagerAccessOpen(true);
+  };
+
   const requestOneTimeCode = async () => {
     if (isOtpRequesting || otpCooldownSeconds > 0) {
       return;
@@ -1010,6 +1024,11 @@ export default function App() {
       return;
     }
 
+    if (signupForm.role === "Manager") {
+      openManagerAccessFromSignup();
+      return;
+    }
+
     const requiredFields = [
       "username",
       "password",
@@ -1118,7 +1137,9 @@ export default function App() {
             {authMode === "login"
               ? "Only registered accounts can access the requisition workspace."
               : authMode === "signup"
-                ? "Select a registered manager, then request a one-time code before signing up."
+                ? signupForm.role === "Manager"
+                  ? "Manager access is paid and requires creator approval through Request Access."
+                  : "Select a registered manager, then request a one-time code before signing up."
                 : "Request a one-time code from your registered email, then enter your new password."}
           </Text>
 
@@ -1280,31 +1301,44 @@ export default function App() {
                   </HoverPressable>
                 ))}
               </View>
-              <TextInput
-                autoCapitalize="none"
-                placeholder="Preferred username (e.g. jdelacruz)"
-                placeholderTextColor="#9ca3af"
-                style={styles.input}
-                value={signupForm.username}
-                onChangeText={(value) => updateSignupField("username", value)}
-              />
-              <PasswordInput
-                placeholder="Password (e.g. StrongPass2026)"
-                value={signupForm.password}
-                onChangeText={(value) => updateSignupField("password", value)}
-                isVisible={showSignupPassword}
-                onToggleVisibility={() => setShowSignupPassword((current) => !current)}
-              />
-              <TextInput
-                autoCapitalize="none"
-                keyboardType="email-address"
-                placeholder="Email (e.g. juan.delacruz@email.com)"
-                placeholderTextColor="#9ca3af"
-                style={styles.input}
-                value={signupForm.email}
-                onChangeText={(value) => updateSignupField("email", value)}
-              />
-              <View style={styles.twoColumn}>
+              {signupForm.role === "Manager" ? (
+                <View style={styles.formStack}>
+                  <Text style={styles.promptText}>
+                    Manager accounts require creator approval. Use Request Access to send your details and receive the
+                    Manager access pricing of 3,500 Pesos.
+                  </Text>
+                  <HoverPressable style={styles.primaryButton} onPress={openManagerAccessFromSignup}>
+                    <Text style={styles.primaryButtonText}>Request Access</Text>
+                    <Feather name="send" size={18} color="#ffffff" />
+                  </HoverPressable>
+                </View>
+              ) : (
+                <>
+                  <TextInput
+                    autoCapitalize="none"
+                    placeholder="Preferred username (e.g. jdelacruz)"
+                    placeholderTextColor="#9ca3af"
+                    style={styles.input}
+                    value={signupForm.username}
+                    onChangeText={(value) => updateSignupField("username", value)}
+                  />
+                  <PasswordInput
+                    placeholder="Password (e.g. StrongPass2026)"
+                    value={signupForm.password}
+                    onChangeText={(value) => updateSignupField("password", value)}
+                    isVisible={showSignupPassword}
+                    onToggleVisibility={() => setShowSignupPassword((current) => !current)}
+                  />
+                  <TextInput
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    placeholder="Email (e.g. juan.delacruz@email.com)"
+                    placeholderTextColor="#9ca3af"
+                    style={styles.input}
+                    value={signupForm.email}
+                    onChangeText={(value) => updateSignupField("email", value)}
+                  />
+                  <View style={styles.twoColumn}>
                 <TextInput
                   placeholder="First name (e.g. Juan)"
                   placeholderTextColor="#9ca3af"
@@ -1385,6 +1419,8 @@ export default function App() {
                 <Text style={styles.primaryButtonText}>Create account</Text>
                 <Feather name="user-plus" size={18} color="#ffffff" />
               </HoverPressable>
+                </>
+              )}
             </View>
           )}
         </ScrollView>
