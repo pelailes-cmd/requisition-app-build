@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const cors = require("cors");
+const crypto = require("crypto");
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -17,7 +18,19 @@ const usePostgres = Boolean(process.env.DATABASE_URL);
 const resendApiUrl = "https://api.resend.com/emails";
 const mailRelayTimeoutMs = Number(process.env.MAIL_RELAY_TIMEOUT_MS || 15000);
 const creatorEmail = process.env.CREATOR_EMAIL || "afhinzz.ailes@gmail.com";
-const managerAccessPrice = "3,500 Pesos";
+const configuredManagerAccessAmountPhp = Number(process.env.MANAGER_ACCESS_AMOUNT_PHP || 3500);
+const managerAccessAmountPhp =
+  Number.isFinite(configuredManagerAccessAmountPhp) && configuredManagerAccessAmountPhp > 0
+    ? configuredManagerAccessAmountPhp
+    : 3500;
+const managerAccessPrice = `${managerAccessAmountPhp.toLocaleString("en-PH")} Pesos`;
+const mayaEnvironment = String(process.env.MAYA_ENV || "sandbox").toLowerCase() === "production" ? "production" : "sandbox";
+const mayaApiBaseUrl =
+  process.env.MAYA_API_BASE_URL || (mayaEnvironment === "production" ? "https://pg.maya.ph" : "https://pg-sandbox.paymaya.com");
+const mayaCheckoutTimeoutMs = Number(process.env.MAYA_CHECKOUT_TIMEOUT_MS || 20000);
+const passwordHashAlgorithm = "scrypt";
+const passwordKeyLength = 64;
+const passwordScryptOptions = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 
 let sqliteDb;
 let pgPool;
@@ -40,6 +53,7 @@ if (usePostgres) {
 
 app.use(cors());
 app.use(express.json());
+app.set("trust proxy", 1);
 
 const transporter = hasSmtpConfig()
   ? nodemailer.createTransport({
@@ -455,6 +469,135 @@ app.post("/manager-access/request", async (req, res) => {
   }
 });
 
+app.post("/manager-access/checkout", async (req, res) => {
+  const request = readManagerAccessBody(req.body);
+
+  if (!request.fullName || !request.email || !request.contactNumber) {
+    return res.status(400).json({ error: "Full name, email, and contact number are required." });
+  }
+
+  if (!process.env.MAYA_PUBLIC_KEY) {
+    return res.status(500).json({ error: "MAYA_PUBLIC_KEY is not configured on the backend." });
+  }
+
+  if (!getEmailProvider()) {
+    return res.status(500).json({ error: "No email provider is configured on the backend." });
+  }
+
+  const accessRequestId = generateManagerAccessRequestId();
+  const requestReferenceNumber = generateMayaReferenceNumber();
+
+  await createManagerAccessRequest({
+    ...request,
+    id: accessRequestId,
+    amountPhp: managerAccessAmountPhp,
+    status: "pending_payment",
+    requestReferenceNumber
+  });
+
+  try {
+    const checkout = await createMayaCheckout({
+      request,
+      requestReferenceNumber,
+      requestBaseUrl: getRequestBaseUrl(req)
+    });
+
+    await markManagerAccessCheckoutCreated({
+      requestReferenceNumber,
+      checkoutId: checkout.checkoutId || checkout.paymentId || checkout.id || "",
+      redirectUrl: checkout.redirectUrl || ""
+    });
+
+    return res.status(201).json({
+      ok: true,
+      redirectUrl: checkout.redirectUrl,
+      checkoutId: checkout.checkoutId || checkout.paymentId || checkout.id || "",
+      requestReferenceNumber,
+      amount: managerAccessPrice,
+      environment: mayaEnvironment
+    });
+  } catch (error) {
+    console.error("Failed to create Maya checkout:", {
+      status: error?.status,
+      code: error?.code,
+      message: error?.message,
+      responseText: error?.responseText
+    });
+    await updateManagerAccessStatus(requestReferenceNumber, "checkout_failed");
+    return res.status(502).json({ error: getMayaErrorMessage(error) });
+  }
+});
+
+app.post("/maya/webhook", async (req, res) => {
+  const event = req.body || {};
+  const paymentStatus = getMayaWebhookStatus(event);
+  const requestReferenceNumber = cleanText(event.requestReferenceNumber || event.request_reference_number);
+  const checkoutId = cleanText(event.checkoutId || event.paymentId || event.id);
+
+  if (!requestReferenceNumber && !checkoutId) {
+    return res.json({ ok: true });
+  }
+
+  const accessRequest = requestReferenceNumber
+    ? await getManagerAccessRequestByReference(requestReferenceNumber)
+    : await getManagerAccessRequestByCheckoutId(checkoutId);
+
+  if (!accessRequest) {
+    return res.json({ ok: true });
+  }
+
+  if (checkoutId && !accessRequest.checkoutId) {
+    await markManagerAccessCheckoutCreated({
+      requestReferenceNumber: accessRequest.requestReferenceNumber,
+      checkoutId,
+      redirectUrl: accessRequest.redirectUrl
+    });
+  }
+
+  if (["PAYMENT_SUCCESS", "CAPTURED", "CHECKOUT_SUCCESS"].includes(paymentStatus)) {
+    try {
+      await fulfillPaidManagerAccess(accessRequest);
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error("Failed to fulfill paid Manager access:", {
+        provider: error?.provider,
+        status: error?.status,
+        code: error?.code,
+        message: error?.message
+      });
+      return res.status(502).json({ error: "Payment was received, but temporary credentials could not be sent yet." });
+    }
+  }
+
+  if (["PAYMENT_FAILED", "PAYMENT_EXPIRED", "PAYMENT_CANCELLED", "CHECKOUT_FAILURE", "CHECKOUT_DROPOUT"].includes(paymentStatus)) {
+    await updateManagerAccessStatus(accessRequest.requestReferenceNumber, paymentStatus.toLowerCase());
+  }
+
+  return res.json({ ok: true });
+});
+
+app.get("/manager-access/payment/:result", async (req, res) => {
+  const result = cleanText(req.params.result).toLowerCase();
+  const reference = cleanText(req.query.ref);
+  const heading =
+    result === "success"
+      ? "Payment Submitted"
+      : result === "cancel"
+        ? "Payment Cancelled"
+        : "Payment Not Completed";
+  const message =
+    result === "success"
+      ? "Maya is confirming your payment. Once the payment webhook is received, the temporary Manager login will be sent to your email."
+      : result === "cancel"
+        ? "You cancelled the Maya Checkout session. You can return to the app and request access again."
+        : "Maya did not complete the payment. You can return to the app and request access again.";
+
+  res
+    .status(200)
+    .type("html")
+    .send(renderPaymentResultPage({ heading, message, reference }));
+});
+
 app.post("/accounts", async (req, res) => {
   const account = {
     username: cleanText(req.body.username),
@@ -467,6 +610,7 @@ app.post("/accounts", async (req, res) => {
     trade: cleanText(req.body.trade),
     head: cleanText(req.body.head),
     managerUsername: cleanText(req.body.managerUsername),
+    company: cleanText(req.body.company),
     role: cleanText(req.body.role)
   };
 
@@ -510,6 +654,47 @@ app.post("/accounts", async (req, res) => {
     }
   }
   return res.status(201).json({ account: await getAccountByUsername(account.username) });
+});
+
+app.post("/accounts/complete-manager-profile", async (req, res) => {
+  const currentUsername = cleanText(req.body.currentUsername).toLowerCase();
+  const currentPassword = cleanText(req.body.currentPassword);
+  const newUsername = cleanText(req.body.username).toLowerCase();
+  const password = cleanText(req.body.password);
+  const email = normalizeEmail(req.body.email);
+  const company = cleanText(req.body.company);
+
+  if (!currentUsername || !currentPassword || !newUsername || !password || !email || !company) {
+    return res.status(400).json({ error: "Username, password, email, and company are required." });
+  }
+
+  const account = await getAccountByUsername(currentUsername);
+  const verifiedAccount = await getAccountForLogin(currentUsername, currentPassword, "Manager");
+
+  if (!account || account.role !== "Manager" || !account.mustChangeCredentials) {
+    return res.status(403).json({ error: "This Manager account does not require first-login setup." });
+  }
+
+  if (!verifiedAccount) {
+    return res.status(401).json({ error: "Temporary password is incorrect. Log in again with the emailed password." });
+  }
+
+  const usernameOwner = await getAccountByUsername(newUsername);
+
+  if (usernameOwner && usernameOwner.username.toLowerCase() !== currentUsername) {
+    return res.status(409).json({ error: "Username unavailable." });
+  }
+
+  await completeManagerProfile({
+    currentUsername,
+    username: newUsername,
+    password,
+    email,
+    company
+  });
+  await ensureManagerSampleProject(newUsername);
+
+  return res.json({ account: await getAccountByUsername(newUsername) });
 });
 
 app.post("/otp/request", async (req, res) => {
@@ -619,6 +804,8 @@ async function initializeDatabase() {
         trade TEXT NOT NULL,
         head TEXT NOT NULL,
         manager_username TEXT NOT NULL DEFAULT '',
+        company TEXT NOT NULL DEFAULT '',
+        must_change_credentials BOOLEAN NOT NULL DEFAULT false,
         role TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -675,8 +862,27 @@ async function initializeDatabase() {
         details TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS manager_access_requests (
+        id TEXT PRIMARY KEY,
+        full_name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        company TEXT NOT NULL DEFAULT '',
+        contact_number TEXT NOT NULL,
+        amount_php NUMERIC(10,2) NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending_payment',
+        request_reference_number TEXT NOT NULL UNIQUE,
+        checkout_id TEXT NOT NULL DEFAULT '',
+        redirect_url TEXT NOT NULL DEFAULT '',
+        temporary_username TEXT NOT NULL DEFAULT '',
+        temporary_password_sent_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
 
+    await pgPool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS company TEXT NOT NULL DEFAULT ''");
+    await pgPool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS must_change_credentials BOOLEAN NOT NULL DEFAULT false");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS charge_to TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS procurement_status TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_confirmation TEXT NOT NULL DEFAULT ''");
@@ -689,6 +895,7 @@ async function initializeDatabase() {
     await pgPool.query("CREATE INDEX IF NOT EXISTS requisitions_project_id_idx ON requisitions(project_id)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_username_idx ON project_members(username)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_manager_idx ON project_members(manager_username)");
+    await pgPool.query("CREATE INDEX IF NOT EXISTS manager_access_requests_checkout_idx ON manager_access_requests(checkout_id)");
   } else {
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
@@ -703,6 +910,8 @@ async function initializeDatabase() {
         trade TEXT NOT NULL,
         head TEXT NOT NULL,
         managerUsername TEXT NOT NULL DEFAULT '',
+        company TEXT NOT NULL DEFAULT '',
+        mustChangeCredentials INTEGER NOT NULL DEFAULT 0,
         role TEXT NOT NULL,
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -760,8 +969,27 @@ async function initializeDatabase() {
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (requisitionId) REFERENCES requisitions(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS manager_access_requests (
+        id TEXT PRIMARY KEY,
+        fullName TEXT NOT NULL,
+        email TEXT NOT NULL,
+        company TEXT NOT NULL DEFAULT '',
+        contactNumber TEXT NOT NULL,
+        amountPhp REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending_payment',
+        requestReferenceNumber TEXT NOT NULL UNIQUE,
+        checkoutId TEXT NOT NULL DEFAULT '',
+        redirectUrl TEXT NOT NULL DEFAULT '',
+        temporaryUsername TEXT NOT NULL DEFAULT '',
+        temporaryPasswordSentAt TEXT,
+        createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
+    addSqliteColumnIfMissing("accounts", "company", "TEXT NOT NULL DEFAULT ''");
+    addSqliteColumnIfMissing("accounts", "mustChangeCredentials", "INTEGER NOT NULL DEFAULT 0");
     addSqliteColumnIfMissing("requisitions", "chargeTo", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "procurementStatus", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "deliveryConfirmation", "TEXT NOT NULL DEFAULT ''");
@@ -773,6 +1001,7 @@ async function initializeDatabase() {
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS requisitionsProjectIdIndex ON requisitions(projectId);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersUsernameIndex ON project_members(username);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersManagerIndex ON project_members(managerUsername);");
+    sqliteDb.exec("CREATE INDEX IF NOT EXISTS managerAccessRequestsCheckoutIndex ON manager_access_requests(checkoutId);");
   }
 
   await seedAccounts();
@@ -1403,18 +1632,31 @@ async function getAccounts() {
 }
 
 async function getAccountForLogin(username, password, role) {
+  const accountUsername = cleanText(username).toLowerCase();
+  const rawPassword = cleanText(password);
+  let account = null;
+
   if (usePostgres) {
     const result = await pgPool.query(
-      "SELECT * FROM accounts WHERE lower(username) = $1 AND password = $2 AND role = $3",
-      [username, password, role]
+      "SELECT * FROM accounts WHERE lower(username) = $1 AND role = $2",
+      [accountUsername, role]
     );
-    return result.rows[0] ? mapAccount(result.rows[0]) : null;
+    account = result.rows[0] || null;
+  } else {
+    account = sqliteDb
+      .prepare("SELECT * FROM accounts WHERE lower(username) = ? AND role = ?")
+      .get(accountUsername, role);
   }
 
-  const account = sqliteDb
-    .prepare("SELECT * FROM accounts WHERE lower(username) = ? AND password = ? AND role = ?")
-    .get(username, password, role);
-  return account ? mapAccount(account) : null;
+  if (!account || !verifyPassword(rawPassword, account.password)) {
+    return null;
+  }
+
+  if (!isPasswordHash(account.password)) {
+    await updateAccountPassword(accountUsername, rawPassword);
+  }
+
+  return mapAccount(account);
 }
 
 async function getAccountByUsername(username) {
@@ -1439,15 +1681,19 @@ async function getPasswordResetRecipient(account) {
 }
 
 async function createAccount(account) {
+  const passwordHash = hashPassword(account.password);
+  const company = cleanText(account.company);
+  const mustChangeCredentials = Boolean(account.mustChangeCredentials);
+
   if (usePostgres) {
     await pgPool.query(
       `INSERT INTO accounts (
         username, password, email, first_name, middle_name, last_name,
-        department, trade, head, manager_username, role
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        department, trade, head, manager_username, company, must_change_credentials, role
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         account.username,
-        account.password,
+        passwordHash,
         account.email,
         account.firstName,
         account.middleName,
@@ -1456,6 +1702,8 @@ async function createAccount(account) {
         account.trade,
         account.head,
         account.managerUsername,
+        company,
+        mustChangeCredentials,
         account.role
       ]
     );
@@ -1466,12 +1714,12 @@ async function createAccount(account) {
     .prepare(
       `INSERT INTO accounts (
         username, password, email, firstName, middleName, lastName,
-        department, trade, head, managerUsername, role
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        department, trade, head, managerUsername, company, mustChangeCredentials, role
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       account.username,
-      account.password,
+      passwordHash,
       account.email,
       account.firstName,
       account.middleName,
@@ -1480,13 +1728,15 @@ async function createAccount(account) {
       account.trade,
       account.head,
       account.managerUsername,
+      company,
+      mustChangeCredentials ? 1 : 0,
       account.role
     );
 }
 
 async function updateAccountPassword(username, password) {
   const accountUsername = cleanText(username).toLowerCase();
-  const nextPassword = cleanText(password);
+  const nextPassword = hashPassword(password);
 
   if (usePostgres) {
     await pgPool.query("UPDATE accounts SET password = $1 WHERE lower(username) = $2", [nextPassword, accountUsername]);
@@ -1494,6 +1744,386 @@ async function updateAccountPassword(username, password) {
   }
 
   sqliteDb.prepare("UPDATE accounts SET password = ? WHERE lower(username) = ?").run(nextPassword, accountUsername);
+}
+
+async function completeManagerProfile({ currentUsername, username, password, email, company }) {
+  const currentAccountUsername = cleanText(currentUsername).toLowerCase();
+  const nextAccountUsername = cleanText(username).toLowerCase();
+  const nextPassword = hashPassword(password);
+
+  if (usePostgres) {
+    await pgPool.query(
+      `UPDATE accounts
+       SET username = $1, password = $2, email = $3, company = $4, must_change_credentials = false
+       WHERE lower(username) = $5 AND role = 'Manager'`,
+      [nextAccountUsername, nextPassword, email, company, currentAccountUsername]
+    );
+    await pgPool.query("UPDATE projects SET manager_username = $1 WHERE lower(manager_username) = $2", [
+      nextAccountUsername,
+      currentAccountUsername
+    ]);
+    await pgPool.query("UPDATE project_members SET manager_username = $1 WHERE lower(manager_username) = $2", [
+      nextAccountUsername,
+      currentAccountUsername
+    ]);
+    await pgPool.query("UPDATE accounts SET manager_username = $1 WHERE lower(manager_username) = $2", [
+      nextAccountUsername,
+      currentAccountUsername
+    ]);
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `UPDATE accounts
+       SET username = ?, password = ?, email = ?, company = ?, mustChangeCredentials = 0
+       WHERE lower(username) = ? AND role = 'Manager'`
+    )
+    .run(nextAccountUsername, nextPassword, email, company, currentAccountUsername);
+  sqliteDb
+    .prepare("UPDATE projects SET managerUsername = ? WHERE lower(managerUsername) = ?")
+    .run(nextAccountUsername, currentAccountUsername);
+  sqliteDb
+    .prepare("UPDATE project_members SET managerUsername = ? WHERE lower(managerUsername) = ?")
+    .run(nextAccountUsername, currentAccountUsername);
+  sqliteDb
+    .prepare("UPDATE accounts SET managerUsername = ? WHERE lower(managerUsername) = ?")
+    .run(nextAccountUsername, currentAccountUsername);
+}
+
+async function createManagerAccessRequest(request) {
+  if (usePostgres) {
+    await pgPool.query(
+      `INSERT INTO manager_access_requests (
+        id, full_name, email, company, contact_number, amount_php, status, request_reference_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        request.id,
+        request.fullName,
+        request.email,
+        request.company,
+        request.contactNumber,
+        request.amountPhp,
+        request.status,
+        request.requestReferenceNumber
+      ]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `INSERT INTO manager_access_requests (
+        id, fullName, email, company, contactNumber, amountPhp, status, requestReferenceNumber
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      request.id,
+      request.fullName,
+      request.email,
+      request.company,
+      request.contactNumber,
+      request.amountPhp,
+      request.status,
+      request.requestReferenceNumber
+    );
+}
+
+async function markManagerAccessCheckoutCreated({ requestReferenceNumber, checkoutId, redirectUrl }) {
+  if (usePostgres) {
+    await pgPool.query(
+      `UPDATE manager_access_requests
+       SET checkout_id = $1, redirect_url = $2, updated_at = NOW()
+       WHERE request_reference_number = $3`,
+      [checkoutId, redirectUrl, requestReferenceNumber]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `UPDATE manager_access_requests
+       SET checkoutId = ?, redirectUrl = ?, updatedAt = CURRENT_TIMESTAMP
+       WHERE requestReferenceNumber = ?`
+    )
+    .run(checkoutId, redirectUrl, requestReferenceNumber);
+}
+
+async function updateManagerAccessStatus(requestReferenceNumber, status) {
+  if (usePostgres) {
+    await pgPool.query(
+      "UPDATE manager_access_requests SET status = $1, updated_at = NOW() WHERE request_reference_number = $2",
+      [status, requestReferenceNumber]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare("UPDATE manager_access_requests SET status = ?, updatedAt = CURRENT_TIMESTAMP WHERE requestReferenceNumber = ?")
+    .run(status, requestReferenceNumber);
+}
+
+async function markManagerAccessPaid({ requestReferenceNumber, temporaryUsername }) {
+  if (usePostgres) {
+    await pgPool.query(
+      `UPDATE manager_access_requests
+       SET status = 'paid', temporary_username = $1, updated_at = NOW()
+       WHERE request_reference_number = $2`,
+      [temporaryUsername, requestReferenceNumber]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `UPDATE manager_access_requests
+       SET status = 'paid', temporaryUsername = ?, updatedAt = CURRENT_TIMESTAMP
+       WHERE requestReferenceNumber = ?`
+    )
+    .run(temporaryUsername, requestReferenceNumber);
+}
+
+async function markManagerAccessCredentialsSent(requestReferenceNumber) {
+  if (usePostgres) {
+    await pgPool.query(
+      `UPDATE manager_access_requests
+       SET status = 'credentials_sent', temporary_password_sent_at = NOW(), updated_at = NOW()
+       WHERE request_reference_number = $1`,
+      [requestReferenceNumber]
+    );
+    return;
+  }
+
+  sqliteDb
+    .prepare(
+      `UPDATE manager_access_requests
+       SET status = 'credentials_sent', temporaryPasswordSentAt = CURRENT_TIMESTAMP, updatedAt = CURRENT_TIMESTAMP
+       WHERE requestReferenceNumber = ?`
+    )
+    .run(requestReferenceNumber);
+}
+
+async function getManagerAccessRequestByReference(requestReferenceNumber) {
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT * FROM manager_access_requests WHERE request_reference_number = $1", [
+      requestReferenceNumber
+    ]);
+    return result.rows[0] ? mapManagerAccessRequest(result.rows[0]) : null;
+  }
+
+  const row = sqliteDb
+    .prepare("SELECT * FROM manager_access_requests WHERE requestReferenceNumber = ?")
+    .get(requestReferenceNumber);
+  return row ? mapManagerAccessRequest(row) : null;
+}
+
+async function getManagerAccessRequestByCheckoutId(checkoutId) {
+  if (usePostgres) {
+    const result = await pgPool.query("SELECT * FROM manager_access_requests WHERE checkout_id = $1", [checkoutId]);
+    return result.rows[0] ? mapManagerAccessRequest(result.rows[0]) : null;
+  }
+
+  const row = sqliteDb.prepare("SELECT * FROM manager_access_requests WHERE checkoutId = ?").get(checkoutId);
+  return row ? mapManagerAccessRequest(row) : null;
+}
+
+async function fulfillPaidManagerAccess(accessRequest) {
+  const latestRequest = await getManagerAccessRequestByReference(accessRequest.requestReferenceNumber);
+
+  if (!latestRequest || latestRequest.status === "credentials_sent") {
+    return;
+  }
+
+  let temporaryUsername = latestRequest.temporaryUsername;
+  const temporaryPassword = generateTemporaryPassword();
+  const nameParts = splitFullName(latestRequest.fullName);
+
+  if (!temporaryUsername) {
+    temporaryUsername = await generateUniqueTemporaryManagerUsername(latestRequest.fullName);
+    await createAccount({
+      username: temporaryUsername,
+      password: temporaryPassword,
+      email: latestRequest.email,
+      firstName: nameParts.firstName,
+      middleName: nameParts.middleName,
+      lastName: nameParts.lastName,
+      department: "Management",
+      trade: "Management",
+      head: "Manager",
+      managerUsername: "",
+      company: latestRequest.company,
+      role: "Manager",
+      mustChangeCredentials: true
+    });
+    await markManagerAccessPaid({
+      requestReferenceNumber: latestRequest.requestReferenceNumber,
+      temporaryUsername
+    });
+  } else if (await getAccountByUsername(temporaryUsername)) {
+    await updateAccountPassword(temporaryUsername, temporaryPassword);
+  } else {
+    await createAccount({
+      username: temporaryUsername,
+      password: temporaryPassword,
+      email: latestRequest.email,
+      firstName: nameParts.firstName,
+      middleName: nameParts.middleName,
+      lastName: nameParts.lastName,
+      department: "Management",
+      trade: "Management",
+      head: "Manager",
+      managerUsername: "",
+      company: latestRequest.company,
+      role: "Manager",
+      mustChangeCredentials: true
+    });
+  }
+
+  await sendTemporaryManagerCredentialsEmail({
+    request: latestRequest,
+    temporaryUsername,
+    temporaryPassword
+  });
+  await markManagerAccessCredentialsSent(latestRequest.requestReferenceNumber);
+}
+
+async function createMayaCheckout({ request, requestReferenceNumber, requestBaseUrl }) {
+  const amountText = managerAccessAmountPhp.toFixed(2);
+  const nameParts = splitFullName(request.fullName);
+  const encodedReference = encodeURIComponent(requestReferenceNumber);
+  const checkoutPayload = {
+    totalAmount: {
+      value: amountText,
+      currency: "PHP"
+    },
+    buyer: {
+      firstName: nameParts.firstName,
+      middleName: nameParts.middleName,
+      lastName: nameParts.lastName,
+      contact: {
+        phone: request.contactNumber,
+        email: request.email
+      }
+    },
+    items: [
+      {
+        name: "Requisition App Manager Access",
+        code: "MANAGER_ACCESS",
+        description: "Paid Manager access for the requisition app",
+        quantity: "1",
+        amount: {
+          value: amountText
+        },
+        totalAmount: {
+          value: amountText
+        }
+      }
+    ],
+    redirectUrl: {
+      success: `${requestBaseUrl}/manager-access/payment/success?ref=${encodedReference}`,
+      failure: `${requestBaseUrl}/manager-access/payment/failure?ref=${encodedReference}`,
+      cancel: `${requestBaseUrl}/manager-access/payment/cancel?ref=${encodedReference}`
+    },
+    requestReferenceNumber,
+    metadata: {
+      product: "manager_access",
+      email: request.email,
+      company: request.company || ""
+    }
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), mayaCheckoutTimeoutMs);
+
+  try {
+    const response = await fetch(`${mayaApiBaseUrl}/checkout/v1/checkouts`, {
+      method: "POST",
+      headers: {
+        Authorization: getMayaAuthHeader(process.env.MAYA_PUBLIC_KEY),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(checkoutPayload),
+      signal: controller.signal
+    });
+    const bodyText = await response.text();
+    let responseBody = null;
+
+    try {
+      responseBody = bodyText ? JSON.parse(bodyText) : null;
+    } catch (parseError) {
+      responseBody = null;
+    }
+
+    if (!response.ok) {
+      const error = new Error(`Maya Checkout request failed with status ${response.status}. ${bodyText}`);
+      error.status = response.status;
+      error.responseText = bodyText;
+      throw error;
+    }
+
+    if (!responseBody?.redirectUrl) {
+      const error = new Error("Maya did not return a checkout redirect URL.");
+      error.responseText = bodyText;
+      throw error;
+    }
+
+    return responseBody;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("Maya Checkout request timed out.");
+      timeoutError.code = "ETIMEDOUT";
+      throw timeoutError;
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  const hash = crypto
+    .scryptSync(cleanText(password), salt, passwordKeyLength, passwordScryptOptions)
+    .toString("base64url");
+
+  return [
+    passwordHashAlgorithm,
+    passwordScryptOptions.N,
+    passwordScryptOptions.r,
+    passwordScryptOptions.p,
+    salt,
+    hash
+  ].join("$");
+}
+
+function verifyPassword(password, storedPassword) {
+  const stored = cleanText(storedPassword);
+  const plainPassword = cleanText(password);
+
+  if (!isPasswordHash(stored)) {
+    return plainPassword === stored;
+  }
+
+  const parts = stored.split("$");
+
+  if (parts.length !== 6 || parts[0] !== passwordHashAlgorithm) {
+    return false;
+  }
+
+  const [, n, r, p, salt, storedHash] = parts;
+  const nextHash = crypto.scryptSync(plainPassword, salt, passwordKeyLength, {
+    N: Number(n),
+    r: Number(r),
+    p: Number(p),
+    maxmem: passwordScryptOptions.maxmem
+  });
+  const storedHashBuffer = Buffer.from(storedHash, "base64url");
+
+  return storedHashBuffer.length === nextHash.length && crypto.timingSafeEqual(storedHashBuffer, nextHash);
+}
+
+function isPasswordHash(value) {
+  return cleanText(value).startsWith(`${passwordHashAlgorithm}$`);
 }
 
 async function getRequisitions(projectId = "") {
@@ -1776,6 +2406,8 @@ function mapAccount(account) {
     trade: account.trade,
     head: account.head,
     managerUsername: account.managerUsername || account.manager_username || "",
+    company: account.company || "",
+    mustChangeCredentials: Boolean(account.mustChangeCredentials || account.must_change_credentials),
     role: account.role
   };
 }
@@ -2004,6 +2636,194 @@ async function sendAppEmail({ to, subject, messageText }) {
   }
 
   throw new Error("No email provider is configured.");
+}
+
+async function sendTemporaryManagerCredentialsEmail({ request, temporaryUsername, temporaryPassword }) {
+  await sendAppEmail({
+    to: request.email,
+    subject: "Your Requisition App Manager access",
+    messageText: [
+      `Hello ${request.fullName},`,
+      "",
+      `Your ${managerAccessPrice} Manager access payment was confirmed.`,
+      "",
+      "Temporary login details:",
+      `Username: ${temporaryUsername}`,
+      `Password: ${temporaryPassword}`,
+      "",
+      "Log in as Manager, then change your username, password, email, and company on the first-login setup screen.",
+      "",
+      "Do not share this temporary password."
+    ].join("\n")
+  });
+
+  try {
+    await sendAppEmail({
+      to: creatorEmail,
+      subject: "Manager access payment confirmed",
+      messageText: [
+        "A Manager access payment was confirmed.",
+        "",
+        `Full name: ${request.fullName}`,
+        `Email: ${request.email}`,
+        `Company: ${request.company || "Not provided"}`,
+        `Contact number: ${request.contactNumber}`,
+        `Reference: ${request.requestReferenceNumber}`,
+        `Temporary username: ${temporaryUsername}`
+      ].join("\n")
+    });
+  } catch (error) {
+    console.error("Failed to send creator payment notice:", {
+      provider: error?.provider,
+      status: error?.status,
+      code: error?.code,
+      message: error?.message
+    });
+  }
+}
+
+function readManagerAccessBody(body) {
+  return {
+    fullName: cleanText(body.fullName),
+    email: normalizeEmail(body.email),
+    company: cleanText(body.company),
+    contactNumber: cleanText(body.contactNumber)
+  };
+}
+
+function mapManagerAccessRequest(request) {
+  return {
+    id: request.id,
+    fullName: request.fullName || request.full_name,
+    email: request.email,
+    company: request.company || "",
+    contactNumber: request.contactNumber || request.contact_number,
+    amountPhp: Number(request.amountPhp || request.amount_php || 0),
+    status: request.status,
+    requestReferenceNumber: request.requestReferenceNumber || request.request_reference_number,
+    checkoutId: request.checkoutId || request.checkout_id || "",
+    redirectUrl: request.redirectUrl || request.redirect_url || "",
+    temporaryUsername: request.temporaryUsername || request.temporary_username || "",
+    temporaryPasswordSentAt: request.temporaryPasswordSentAt || request.temporary_password_sent_at || "",
+    createdAt: request.createdAt || request.created_at || "",
+    updatedAt: request.updatedAt || request.updated_at || ""
+  };
+}
+
+function getMayaAuthHeader(apiKey) {
+  return `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`;
+}
+
+function getMayaWebhookStatus(event) {
+  return cleanText(event.paymentStatus || event.status || event.name || event.eventType || event.event).toUpperCase();
+}
+
+function getRequestBaseUrl(req) {
+  return (
+    cleanText(process.env.PUBLIC_API_URL || process.env.API_BASE_URL || process.env.RENDER_EXTERNAL_URL) ||
+    `${req.protocol}://${req.get("host")}`
+  );
+}
+
+function getMayaErrorMessage(error) {
+  if (error?.code === "ETIMEDOUT") {
+    return "Maya Checkout did not respond in time. Try again in a moment.";
+  }
+
+  if (error?.status === 401 || error?.status === 403) {
+    return "Maya rejected the API key. Check MAYA_PUBLIC_KEY and MAYA_ENV on the backend.";
+  }
+
+  if (error?.status === 400) {
+    return "Maya rejected the checkout details. Check the Maya request fields and API key environment.";
+  }
+
+  return "The backend could not create the Maya Checkout session.";
+}
+
+function generateManagerAccessRequestId() {
+  return `MAR-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function generateMayaReferenceNumber() {
+  return `MA-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`.slice(0, 36);
+}
+
+async function generateUniqueTemporaryManagerUsername(fullName) {
+  const base = `mgr-${slugifyUsername(fullName).slice(0, 14) || "access"}`.slice(0, 18);
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const username = `${base}-${crypto.randomBytes(2).toString("hex")}`;
+
+    if (!(await getAccountByUsername(username))) {
+      return username;
+    }
+  }
+
+  return `mgr-${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function generateTemporaryPassword() {
+  return `Temp-${crypto.randomBytes(9).toString("base64url")}`;
+}
+
+function splitFullName(fullName) {
+  const parts = cleanText(fullName).split(/\s+/).filter(Boolean);
+
+  if (parts.length === 0) {
+    return { firstName: "Manager", middleName: "", lastName: "Access" };
+  }
+
+  if (parts.length === 1) {
+    return { firstName: parts[0], middleName: "", lastName: "Access" };
+  }
+
+  return {
+    firstName: parts[0],
+    middleName: parts.length > 2 ? parts.slice(1, -1).join(" ") : "",
+    lastName: parts[parts.length - 1]
+  };
+}
+
+function renderPaymentResultPage({ heading, message, reference }) {
+  const safeHeading = escapeHtml(heading);
+  const safeMessage = escapeHtml(message);
+  const safeReference = escapeHtml(reference);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${safeHeading}</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f8fafc; color: #111827; }
+    main { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    section { max-width: 520px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 28px; box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08); }
+    h1 { margin: 0 0 12px; font-size: 28px; line-height: 1.2; }
+    p { margin: 0 0 14px; line-height: 1.6; color: #374151; }
+    small { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>${safeHeading}</h1>
+      <p>${safeMessage}</p>
+      ${safeReference ? `<small>Reference: ${safeReference}</small>` : ""}
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return cleanText(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function sendOtpEmailWithMailRelay({ managerEmail, subject, messageText }) {

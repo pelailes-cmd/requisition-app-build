@@ -41,7 +41,18 @@ Local development uses SQLite automatically. Render deployment uses PostgreSQL w
    SMTP_SECURE=true
    ```
 
-4. Start the backend:
+4. Add Maya Checkout values for paid Manager access:
+
+   ```text
+   MANAGER_ACCESS_AMOUNT_PHP=3500
+   MAYA_ENV=sandbox
+   MAYA_PUBLIC_KEY=pk-your-maya-public-key
+   PUBLIC_API_URL=https://requisition-app-api.onrender.com
+   ```
+
+   Use `MAYA_ENV=production` with your production Maya public key only after sandbox testing is approved.
+
+5. Start the backend:
 
    ```powershell
    npm start
@@ -82,6 +93,10 @@ After creating the Blueprint on Render, add these service environment variables 
 ```text
 MAIL_RELAY_URL=https://script.google.com/macros/s/your-deployment-id/exec
 MAIL_RELAY_SECRET=use-a-long-random-secret-here
+MANAGER_ACCESS_AMOUNT_PHP=3500
+MAYA_ENV=sandbox
+MAYA_PUBLIC_KEY=pk-your-maya-public-key
+PUBLIC_API_URL=https://requisition-app-api.onrender.com
 ```
 
 `MAIL_RELAY_SECRET` must be the same value you paste into `backend/google-apps-script-mail-relay.js` before deploying it in Google Apps Script.
@@ -92,3 +107,13 @@ Then update the Expo app to use the Render service URL:
 $env:EXPO_PUBLIC_API_URL="https://requisition-app-api.onrender.com"
 npx.cmd expo start --clear
 ```
+
+## Maya Checkout Webhook
+
+In Maya Business Manager, point the Checkout payment webhook to:
+
+```text
+https://requisition-app-api.onrender.com/maya/webhook
+```
+
+The app creates the checkout using the public key, redirects the user to Maya, and waits for Maya's webhook before generating temporary Manager credentials.

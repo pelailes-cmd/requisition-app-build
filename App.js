@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -187,6 +188,13 @@ const EMPTY_MANAGER_ACCESS_FORM = {
   contactNumber: ""
 };
 
+const EMPTY_MANAGER_PROFILE_FORM = {
+  username: "",
+  password: "",
+  email: "",
+  company: ""
+};
+
 const OTP_REQUEST_COOLDOWN_SECONDS = 60;
 
 export default function App() {
@@ -211,6 +219,9 @@ export default function App() {
   const [isManagerAccessOpen, setIsManagerAccessOpen] = useState(false);
   const [managerAccessForm, setManagerAccessForm] = useState(EMPTY_MANAGER_ACCESS_FORM);
   const [isManagerAccessSending, setIsManagerAccessSending] = useState(false);
+  const [managerProfileForm, setManagerProfileForm] = useState(EMPTY_MANAGER_PROFILE_FORM);
+  const [showManagerProfilePassword, setShowManagerProfilePassword] = useState(false);
+  const [isManagerProfileSaving, setIsManagerProfileSaving] = useState(false);
   const [projects, setProjects] = useState(INITIAL_PROJECTS);
   const [selectedProjectId, setSelectedProjectId] = useState("sample");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -318,7 +329,8 @@ export default function App() {
     if (isOtpRequesting) return "Sending code";
     if (isPasswordResetRequesting) return "Sending reset code";
     if (isPasswordResetSaving) return "Updating password";
-    if (isManagerAccessSending) return "Sending access request";
+    if (isManagerAccessSending) return "Opening Maya Checkout";
+    if (isManagerProfileSaving) return "Saving Manager profile";
     if (isRefreshLoading) return "Refreshing workspace";
     if (isItemSaving) return editingItem ? "Saving request" : "Creating request";
     if (isProjectSaving) return "Saving project";
@@ -332,6 +344,7 @@ export default function App() {
     isPasswordResetRequesting,
     isPasswordResetSaving,
     isManagerAccessSending,
+    isManagerProfileSaving,
     isRefreshLoading,
     isItemSaving,
     editingItem,
@@ -760,6 +773,15 @@ export default function App() {
         return;
       }
 
+      if (result.account?.mustChangeCredentials) {
+        setManagerProfileForm({
+          username: result.account.username || "",
+          password: "",
+          email: result.account.email || "",
+          company: result.account.company || ""
+        });
+      }
+
       setUser(result.account);
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
@@ -778,6 +800,8 @@ export default function App() {
     setShowSignupPassword(false);
     setShowResetPassword(false);
     setPasswordResetForm(EMPTY_PASSWORD_RESET_FORM);
+    setManagerProfileForm(EMPTY_MANAGER_PROFILE_FORM);
+    setShowManagerProfilePassword(false);
     setQuery("");
     setStatusFilter("All");
     setProjects(INITIAL_PROJECTS);
@@ -817,6 +841,10 @@ export default function App() {
 
   const updateManagerAccessField = (field, value) => {
     setManagerAccessForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const updateManagerProfileField = (field, value) => {
+    setManagerProfileForm((current) => ({ ...current, [field]: value }));
   };
 
   const openManagerAccessFromSignup = () => {
@@ -989,7 +1017,7 @@ export default function App() {
     setIsManagerAccessSending(true);
 
     try {
-      const response = await fetch(`${OTP_API_URL}/manager-access/request`, {
+      const response = await fetch(`${OTP_API_URL}/manager-access/checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1002,20 +1030,85 @@ export default function App() {
       const result = await response.json();
 
       if (!response.ok) {
-        Alert.alert("Request not sent", result.error || "The backend could not send the access request.");
+        Alert.alert("Checkout not opened", result.error || "The backend could not create the Maya Checkout session.");
         return;
       }
 
       setManagerAccessForm(EMPTY_MANAGER_ACCESS_FORM);
       setIsManagerAccessOpen(false);
+      if (result.redirectUrl) {
+        try {
+          await Linking.openURL(result.redirectUrl);
+        } catch (openError) {
+          Alert.alert("Checkout created", `Open this Maya Checkout link:\n\n${result.redirectUrl}`);
+          return;
+        }
+      }
       Alert.alert(
-        "Request sent",
-        "Your Manager access request was sent. The access pricing was also sent to your email."
+        "Maya Checkout opened",
+        "Complete the payment in Maya. After payment confirmation, temporary Manager login details will be emailed to you."
       );
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
     } finally {
       setIsManagerAccessSending(false);
+    }
+  };
+
+  const completeManagerProfile = async () => {
+    if (isManagerProfileSaving || !user) {
+      return;
+    }
+
+    const nextUsername = managerProfileForm.username.trim().toLowerCase();
+    const nextPassword = managerProfileForm.password.trim();
+    const nextEmail = managerProfileForm.email.trim().toLowerCase();
+    const nextCompany = managerProfileForm.company.trim();
+
+    if (!nextUsername || !nextPassword || !nextEmail || !nextCompany) {
+      Alert.alert("Missing information", "Enter your new username, password, email, and company.");
+      return;
+    }
+
+    setIsManagerProfileSaving(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/accounts/complete-manager-profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentUsername: user.username,
+          currentPassword: password,
+          username: nextUsername,
+          password: nextPassword,
+          email: nextEmail,
+          company: nextCompany
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Profile not saved", result.error || "The backend could not save your Manager profile.");
+        return;
+      }
+
+      setUser(result.account);
+      setAccounts((current) => {
+        const exists = current.some((account) => account.username === user.username);
+        return exists
+          ? current.map((account) => (account.username === user.username ? result.account : account))
+          : [...current, result.account];
+      });
+      setSelectedRole("Manager");
+      setUsername(result.account.username);
+      setPassword("");
+      setManagerProfileForm(EMPTY_MANAGER_PROFILE_FORM);
+      setShowManagerProfilePassword(false);
+      Alert.alert("Manager profile saved", "Use your new login details the next time you sign in.");
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsManagerProfileSaving(false);
     }
   };
 
@@ -1138,7 +1231,7 @@ export default function App() {
               ? "Only registered accounts can access the requisition workspace."
               : authMode === "signup"
                 ? signupForm.role === "Manager"
-                  ? "Manager access is paid and requires creator approval through Request Access."
+                  ? "Manager access is paid through Maya Checkout."
                   : "Select a registered manager, then request a one-time code before signing up."
                 : "Request a one-time code from your registered email, then enter your new password."}
           </Text>
@@ -1304,8 +1397,8 @@ export default function App() {
               {signupForm.role === "Manager" ? (
                 <View style={styles.formStack}>
                   <Text style={styles.promptText}>
-                    Manager accounts require creator approval. Use Request Access to send your details and receive the
-                    Manager access pricing of 3,500 Pesos.
+                    Manager accounts require paid access. Use Request Access to pay through Maya Checkout and receive
+                    temporary login details after payment confirmation.
                   </Text>
                   <HoverPressable style={styles.primaryButton} onPress={openManagerAccessFromSignup}>
                     <Text style={styles.primaryButtonText}>Request Access</Text>
@@ -1617,6 +1710,15 @@ export default function App() {
         item={selectedRequisition}
         project={selectedProject}
         onClose={() => setSelectedRequisitionId(null)}
+      />
+      <ManagerFirstLoginModal
+        visible={!!user?.mustChangeCredentials}
+        form={managerProfileForm}
+        isSaving={isManagerProfileSaving}
+        showPassword={showManagerProfilePassword}
+        onChange={updateManagerProfileField}
+        onTogglePassword={() => setShowManagerProfilePassword((current) => !current)}
+        onSubmit={completeManagerProfile}
       />
       <LoadingOverlay visible={!!loadingMessage} message={loadingMessage} />
     </AppFrame>
@@ -2363,7 +2465,8 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
 
           <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
             <Text style={styles.promptText}>
-              This sends a Manager access request to the app creator. Manager access pricing is 3,500 Pesos.
+              This opens Maya Checkout for Manager access. After payment confirmation, temporary login details will be
+              sent to your email.
             </Text>
             <TextInput
               placeholder="Full name (e.g. Juan Dela Cruz)"
@@ -2403,8 +2506,74 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
             onPress={onSubmit}
             disabled={isSending}
           >
-            <Text style={styles.primaryButtonText}>{isSending ? "Sending..." : "Send request"}</Text>
+            <Text style={styles.primaryButtonText}>{isSending ? "Opening..." : "Pay with Maya"}</Text>
             <Feather name="send" size={18} color="#ffffff" />
+          </HoverPressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ManagerFirstLoginModal({ visible, form, isSaving, showPassword, onChange, onTogglePassword, onSubmit }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={() => {}}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalPanel}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalTitleBlock}>
+              <Text style={styles.kicker}>First login</Text>
+              <Text style={styles.modalTitle}>Set Manager Profile</Text>
+            </View>
+            <View style={styles.iconBadge}>
+              <Feather name="lock" size={20} color="#111827" />
+            </View>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
+            <Text style={styles.promptText}>
+              Change the temporary login details before using the Manager workspace.
+            </Text>
+            <TextInput
+              autoCapitalize="none"
+              placeholder="New username (e.g. acme.manager)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.username}
+              onChangeText={(value) => onChange("username", value)}
+            />
+            <PasswordInput
+              placeholder="New password (e.g. StrongPass2026)"
+              value={form.password}
+              onChangeText={(value) => onChange("password", value)}
+              isVisible={showPassword}
+              onToggleVisibility={onTogglePassword}
+            />
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="Email (e.g. manager@company.com)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.email}
+              onChangeText={(value) => onChange("email", value)}
+            />
+            <TextInput
+              placeholder="Company (e.g. Ailes Construction)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.company}
+              onChangeText={(value) => onChange("company", value)}
+            />
+          </ScrollView>
+
+          <HoverPressable
+            style={[styles.primaryButton, isSaving && styles.disabledButton]}
+            onPress={onSubmit}
+            disabled={isSaving}
+          >
+            <Text style={styles.primaryButtonText}>{isSaving ? "Saving..." : "Save Manager profile"}</Text>
+            <Feather name="check" size={18} color="#ffffff" />
           </HoverPressable>
         </View>
       </View>
