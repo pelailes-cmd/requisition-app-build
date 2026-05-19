@@ -316,7 +316,7 @@ app.post("/password-reset/request", async (req, res) => {
   const recipient = await getPasswordResetRecipient(account);
 
   if (!recipient.email) {
-    return res.status(400).json({ error: "No manager email is available for this account." });
+    return res.status(400).json({ error: "No email is available for this account." });
   }
 
   const code = generateCode();
@@ -343,8 +343,7 @@ app.post("/password-reset/request", async (req, res) => {
     return res.json({
       ok: true,
       expiresInMinutes: otpExpiresMinutes,
-      sentTo: recipient.isSelf ? "account" : "manager",
-      managerName: recipient.name
+      sentTo: "account"
     });
   } catch (error) {
     console.error("Failed to send password reset email:", {
@@ -1425,24 +1424,9 @@ async function getAccountByUsername(username) {
 }
 
 async function getPasswordResetRecipient(account) {
-  const managerUsername = cleanText(account.managerUsername).toLowerCase();
-
-  if (managerUsername) {
-    const manager = await getAccountByUsername(managerUsername);
-
-    if (manager?.email) {
-      return {
-        email: manager.email,
-        name: getAccountDisplayName(manager) || "Manager",
-        isSelf: false
-      };
-    }
-  }
-
   return {
     email: account.email,
-    name: getAccountDisplayName(account) || "Manager",
-    isSelf: true
+    name: getAccountDisplayName(account) || "User"
   };
 }
 
@@ -1959,7 +1943,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
     ? [
         `Hello ${managerName},`,
         "",
-        `A ${role} user is requesting a password change for the requisition app.`,
+        `A password change was requested for your ${role} account in the requisition app.`,
         `Username: ${username}`,
         `Account email: ${applicantEmail}`,
         `One-time code: ${code}`,

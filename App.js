@@ -902,9 +902,7 @@ export default function App() {
 
       Alert.alert(
         "Code requested",
-        result.sentTo === "account"
-          ? "A one-time password reset code was sent to your account email."
-          : `A one-time password reset code was sent to ${result.managerName || "your manager"}.`
+        "A one-time password reset code was sent to your registered account email."
       );
       setPasswordResetCooldownSeconds(OTP_REQUEST_COOLDOWN_SECONDS);
     } catch (error) {
@@ -1121,7 +1119,7 @@ export default function App() {
               ? "Only registered accounts can access the requisition workspace."
               : authMode === "signup"
                 ? "Select a registered manager, then request a one-time code before signing up."
-                : "Request a one-time code from your manager, then enter your new password."}
+                : "Request a one-time code from your registered email, then enter your new password."}
           </Text>
 
           <View style={styles.authTabs}>
@@ -1225,7 +1223,7 @@ export default function App() {
               <View style={styles.codeRow}>
                 <TextInput
                   keyboardType="number-pad"
-                  placeholder="6-digit code from manager"
+                  placeholder="6-digit code from your email"
                   placeholderTextColor="#9ca3af"
                   style={[styles.input, styles.codeInput]}
                   value={passwordResetForm.code}
