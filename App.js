@@ -3219,8 +3219,7 @@ const styles = StyleSheet.create({
   },
   dashboard: {
     padding: 18,
-    paddingBottom: 34,
-    paddingTop: 72
+    paddingBottom: 34
   },
   header: {
     alignItems: "flex-start",
@@ -3244,7 +3243,8 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8
+    gap: 8,
+    paddingRight: 52
   },
   headerIconButton: {
     alignItems: "center",
