@@ -110,7 +110,7 @@ To show your Maya Business QR image inside Expo Go, also set this before startin
 
 ```powershell
 $env:EXPO_PUBLIC_MAYA_QR_IMAGE_URL="https://your-public-image-url/maya-qr.png"
-$env:EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME="Your Maya Business Name"
+$env:EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME="Construction Apps"
 npx.cmd expo start --clear
 ```
 

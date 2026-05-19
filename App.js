@@ -145,7 +145,7 @@ const MANAGER_EMAIL = "afhinzz.ailes@gmail.com";
 const OTP_API_URL = process.env.EXPO_PUBLIC_API_URL || "https://requisition-app-api.onrender.com";
 const MANAGER_ACCESS_PRICE = "3,500 Pesos";
 const MAYA_QR_IMAGE_URL = process.env.EXPO_PUBLIC_MAYA_QR_IMAGE_URL || "";
-const MAYA_QR_DISPLAY_NAME = process.env.EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME || "Maya Business QR";
+const MAYA_QR_DISPLAY_NAME = process.env.EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME || "Construction Apps";
 
 const INITIAL_ACCOUNTS = [
   {
