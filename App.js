@@ -1625,23 +1625,30 @@ export default function App() {
           </View>
           <View style={styles.headerActions}>
             {projects.length > 0 && (
-              <ProjectDropdown
-                projects={projects}
-                selectedProjectId={selectedProjectId}
-                visible={isProjectMenuOpen}
-                canCreate={user.role === "Manager"}
-                onOpen={() => setIsProjectMenuOpen(true)}
-                onClose={() => setIsProjectMenuOpen(false)}
-                onSelect={(projectId) => {
-                  setSelectedProjectId(projectId);
-                  setIsProjectMenuOpen(false);
-                }}
-                onCreate={() => {
-                  setProjectForm(EMPTY_PROJECT_FORM);
-                  setIsProjectMenuOpen(false);
-                  setIsProjectFormOpen(true);
-                }}
-              />
+              <View style={styles.projectActionsGroup}>
+                <ProjectDropdown
+                  projects={projects}
+                  selectedProjectId={selectedProjectId}
+                  visible={isProjectMenuOpen}
+                  canCreate={user.role === "Manager"}
+                  onOpen={() => setIsProjectMenuOpen(true)}
+                  onClose={() => setIsProjectMenuOpen(false)}
+                  onSelect={(projectId) => {
+                    setSelectedProjectId(projectId);
+                    setIsProjectMenuOpen(false);
+                  }}
+                  onCreate={() => {
+                    setProjectForm(EMPTY_PROJECT_FORM);
+                    setIsProjectMenuOpen(false);
+                    setIsProjectFormOpen(true);
+                  }}
+                />
+                {user.role === "Manager" && (
+                  <HoverPressable style={styles.headerIconButton} onPress={openProjectSettings}>
+                    <Feather name="settings" size={18} color="#111827" />
+                  </HoverPressable>
+                )}
+              </View>
             )}
             <HoverPressable
               style={[styles.headerIconButton, isRefreshLoading && styles.disabledControl]}
@@ -1656,11 +1663,6 @@ export default function App() {
             <HoverPressable style={styles.headerIconButton} onPress={shareAllRequisitions}>
               <Feather name="share-2" size={18} color="#111827" />
             </HoverPressable>
-            {user.role === "Manager" && (
-              <HoverPressable style={styles.headerIconButton} onPress={openProjectSettings}>
-                <Feather name="settings" size={18} color="#111827" />
-              </HoverPressable>
-            )}
           </View>
         </View>
 
@@ -3806,10 +3808,16 @@ const styles = StyleSheet.create({
     letterSpacing: 0
   },
   headerActions: {
+    alignItems: "center",
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
     paddingRight: 52
+  },
+  projectActionsGroup: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
   },
   headerIconButton: {
     alignItems: "center",
