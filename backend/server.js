@@ -16,6 +16,8 @@ const pendingCodes = new Map();
 const usePostgres = Boolean(process.env.DATABASE_URL);
 const resendApiUrl = "https://api.resend.com/emails";
 const mailRelayTimeoutMs = Number(process.env.MAIL_RELAY_TIMEOUT_MS || 15000);
+const creatorEmail = process.env.CREATOR_EMAIL || "afhinzz.ailes@gmail.com";
+const managerAccessPrice = "3,500 Pesos";
 
 let sqliteDb;
 let pgPool;
@@ -391,6 +393,67 @@ app.post("/password-reset/confirm", async (req, res) => {
   await updateAccountPassword(username, password);
   pendingCodes.set(key, { ...savedCode, used: true });
   return res.json({ ok: true });
+});
+
+app.post("/manager-access/request", async (req, res) => {
+  const request = {
+    fullName: cleanText(req.body.fullName),
+    email: normalizeEmail(req.body.email),
+    company: cleanText(req.body.company),
+    contactNumber: cleanText(req.body.contactNumber)
+  };
+
+  if (!request.fullName || !request.email || !request.contactNumber) {
+    return res.status(400).json({ error: "Full name, email, and contact number are required." });
+  }
+
+  if (!getEmailProvider()) {
+    return res.status(500).json({ error: "No email provider is configured on the backend." });
+  }
+
+  try {
+    await sendAppEmail({
+      to: creatorEmail,
+      subject: "Manager access request",
+      messageText: [
+        "A user requested Manager access for the requisition app.",
+        "",
+        `Full name: ${request.fullName}`,
+        `Email: ${request.email}`,
+        `Company: ${request.company || "Not provided"}`,
+        `Contact number: ${request.contactNumber}`,
+        "",
+        `Manager access price: ${managerAccessPrice}`
+      ].join("\n")
+    });
+
+    await sendAppEmail({
+      to: request.email,
+      subject: "Requisition App Manager access pricing",
+      messageText: [
+        `Hello ${request.fullName},`,
+        "",
+        "Your Manager access request for the requisition app was received.",
+        `Manager access price: ${managerAccessPrice}`,
+        "",
+        "The app creator will review your request and reply to this email for the next steps.",
+        "",
+        "Thank you."
+      ].join("\n")
+    });
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("Failed to send manager access request:", {
+      provider: error?.provider,
+      status: error?.status,
+      code: error?.code,
+      command: error?.command,
+      responseCode: error?.responseCode,
+      message: error?.message
+    });
+    return res.status(502).json({ error: getMailErrorMessage(error) });
+  }
 });
 
 app.post("/accounts", async (req, res) => {
@@ -1913,9 +1976,19 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
         `This code expires in ${otpExpiresMinutes} minutes.`
       ].join("\n");
 
+  return await sendAppEmail({
+    to: managerEmail,
+    subject,
+    messageText
+  });
+}
+
+async function sendAppEmail({ to, subject, messageText }) {
+  const recipient = normalizeEmail(to);
+
   if (hasMailRelayConfig()) {
     return await sendOtpEmailWithMailRelay({
-      managerEmail,
+      managerEmail: recipient,
       subject,
       messageText
     });
@@ -1923,7 +1996,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
 
   if (hasResendConfig()) {
     return await sendOtpEmailWithResend({
-      managerEmail,
+      managerEmail: recipient,
       subject,
       messageText
     });
@@ -1932,7 +2005,7 @@ async function sendOtpEmail({ applicantEmail, code, managerEmail, managerName, r
   if (hasSmtpConfig() && transporter) {
     return await transporter.sendMail({
       from: `"Requisition App" <${process.env.GMAIL_USER}>`,
-      to: managerEmail,
+      to: recipient,
       subject,
       text: messageText
     });

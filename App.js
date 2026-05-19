@@ -180,6 +180,13 @@ const EMPTY_PASSWORD_RESET_FORM = {
   password: ""
 };
 
+const EMPTY_MANAGER_ACCESS_FORM = {
+  fullName: "",
+  email: "",
+  company: "",
+  contactNumber: ""
+};
+
 const OTP_REQUEST_COOLDOWN_SECONDS = 60;
 
 export default function App() {
@@ -201,6 +208,9 @@ export default function App() {
   const [isPasswordResetRequesting, setIsPasswordResetRequesting] = useState(false);
   const [isPasswordResetSaving, setIsPasswordResetSaving] = useState(false);
   const [passwordResetCooldownSeconds, setPasswordResetCooldownSeconds] = useState(0);
+  const [isManagerAccessOpen, setIsManagerAccessOpen] = useState(false);
+  const [managerAccessForm, setManagerAccessForm] = useState(EMPTY_MANAGER_ACCESS_FORM);
+  const [isManagerAccessSending, setIsManagerAccessSending] = useState(false);
   const [projects, setProjects] = useState(INITIAL_PROJECTS);
   const [selectedProjectId, setSelectedProjectId] = useState("sample");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -308,6 +318,7 @@ export default function App() {
     if (isOtpRequesting) return "Sending code";
     if (isPasswordResetRequesting) return "Sending reset code";
     if (isPasswordResetSaving) return "Updating password";
+    if (isManagerAccessSending) return "Sending access request";
     if (isRefreshLoading) return "Refreshing workspace";
     if (isItemSaving) return editingItem ? "Saving request" : "Creating request";
     if (isProjectSaving) return "Saving project";
@@ -320,6 +331,7 @@ export default function App() {
     isOtpRequesting,
     isPasswordResetRequesting,
     isPasswordResetSaving,
+    isManagerAccessSending,
     isRefreshLoading,
     isItemSaving,
     editingItem,
@@ -803,6 +815,10 @@ export default function App() {
     setPasswordResetForm((current) => ({ ...current, [field]: value }));
   };
 
+  const updateManagerAccessField = (field, value) => {
+    setManagerAccessForm((current) => ({ ...current, [field]: value }));
+  };
+
   const requestOneTimeCode = async () => {
     if (isOtpRequesting || otpCooldownSeconds > 0) {
       return;
@@ -941,6 +957,53 @@ export default function App() {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
     } finally {
       setIsPasswordResetSaving(false);
+    }
+  };
+
+  const submitManagerAccessRequest = async () => {
+    if (isManagerAccessSending) {
+      return;
+    }
+
+    const fullName = managerAccessForm.fullName.trim();
+    const email = managerAccessForm.email.trim().toLowerCase();
+    const contactNumber = managerAccessForm.contactNumber.trim();
+
+    if (!fullName || !email || !contactNumber) {
+      Alert.alert("Missing information", "Full name, email, and contact number are required.");
+      return;
+    }
+
+    setIsManagerAccessSending(true);
+
+    try {
+      const response = await fetch(`${OTP_API_URL}/manager-access/request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fullName,
+          email,
+          company: managerAccessForm.company.trim(),
+          contactNumber
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok) {
+        Alert.alert("Request not sent", result.error || "The backend could not send the access request.");
+        return;
+      }
+
+      setManagerAccessForm(EMPTY_MANAGER_ACCESS_FORM);
+      setIsManagerAccessOpen(false);
+      Alert.alert(
+        "Request sent",
+        "Your Manager access request was sent. The access pricing was also sent to your email."
+      );
+    } catch (error) {
+      Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
+    } finally {
+      setIsManagerAccessSending(false);
     }
   };
 
@@ -1112,6 +1175,10 @@ export default function App() {
               <HoverPressable style={styles.textButton} onPress={() => setAuthMode("forgot")}>
                 <Feather name="help-circle" size={16} color="#2563eb" />
                 <Text style={styles.textButtonText}>Forgot password?</Text>
+              </HoverPressable>
+              <HoverPressable style={styles.textButton} onPress={() => setIsManagerAccessOpen(true)}>
+                <Feather name="send" size={16} color="#2563eb" />
+                <Text style={styles.textButtonText}>Request Access</Text>
               </HoverPressable>
               <HoverPressable
                 style={[styles.primaryButton, isLoginLoading && styles.disabledButton]}
@@ -1323,6 +1390,14 @@ export default function App() {
             </View>
           )}
         </ScrollView>
+        <ManagerAccessRequestModal
+          visible={isManagerAccessOpen}
+          form={managerAccessForm}
+          isSending={isManagerAccessSending}
+          onChange={updateManagerAccessField}
+          onClose={() => setIsManagerAccessOpen(false)}
+          onSubmit={submitManagerAccessRequest}
+        />
         <LoadingOverlay visible={!!loadingMessage} message={loadingMessage} />
       </AppFrame>
     );
@@ -2231,6 +2306,72 @@ function RequisitionDetailModal({ visible, item, project, onClose }) {
               <Text style={styles.secondaryButtonText}>Share</Text>
             </HoverPressable>
           </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose, onSubmit }) {
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalPanel}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalTitleBlock}>
+              <Text style={styles.kicker}>Manager access</Text>
+              <Text style={styles.modalTitle}>Request Access</Text>
+            </View>
+            <HoverPressable style={styles.iconButton} onPress={onClose}>
+              <Feather name="x" size={20} color="#111827" />
+            </HoverPressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
+            <Text style={styles.promptText}>
+              This sends a Manager access request to the app creator. Manager access pricing is 3,500 Pesos.
+            </Text>
+            <TextInput
+              placeholder="Full name (e.g. Juan Dela Cruz)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.fullName}
+              onChangeText={(value) => onChange("fullName", value)}
+            />
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="Email (e.g. juan.delacruz@email.com)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.email}
+              onChangeText={(value) => onChange("email", value)}
+            />
+            <TextInput
+              placeholder="Company (optional)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.company}
+              onChangeText={(value) => onChange("company", value)}
+            />
+            <TextInput
+              keyboardType="phone-pad"
+              placeholder="Contact number (e.g. 09171234567)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.contactNumber}
+              onChangeText={(value) => onChange("contactNumber", value)}
+            />
+          </ScrollView>
+
+          <HoverPressable
+            style={[styles.primaryButton, isSending && styles.disabledButton]}
+            onPress={onSubmit}
+            disabled={isSending}
+          >
+            <Text style={styles.primaryButtonText}>{isSending ? "Sending..." : "Send request"}</Text>
+            <Feather name="send" size={18} color="#ffffff" />
+          </HoverPressable>
         </View>
       </View>
     </Modal>
@@ -3739,6 +3880,16 @@ const styles = StyleSheet.create({
     color: "#2563eb",
     fontSize: 14,
     fontWeight: "800"
+  },
+  promptText: {
+    backgroundColor: "#ffffff",
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    borderWidth: 1,
+    color: "#475569",
+    fontSize: 14,
+    lineHeight: 21,
+    padding: 12
   },
   dangerButton: {
     alignItems: "center",
