@@ -146,6 +146,7 @@ const OTP_API_URL = process.env.EXPO_PUBLIC_API_URL || "https://requisition-app-
 const MANAGER_ACCESS_PRICE = "3,500 Pesos";
 const MAYA_QR_IMAGE_URL = process.env.EXPO_PUBLIC_MAYA_QR_IMAGE_URL || "";
 const MAYA_QR_DISPLAY_NAME = process.env.EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME || "Construction Apps";
+const MAYA_QR_IMAGE_SOURCE = MAYA_QR_IMAGE_URL ? { uri: MAYA_QR_IMAGE_URL } : require("./assets/maya-qr.png");
 
 const INITIAL_ACCOUNTS = [
   {
@@ -2469,13 +2470,7 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
               Pay {MANAGER_ACCESS_PRICE} through Maya QR, then submit the payment reference for creator review.
             </Text>
             <View style={styles.qrPaymentPanel}>
-              {MAYA_QR_IMAGE_URL ? (
-                <Image source={{ uri: MAYA_QR_IMAGE_URL }} style={styles.qrImage} resizeMode="contain" />
-              ) : (
-                <View style={styles.qrPlaceholder}>
-                  <Feather name="grid" size={30} color="#2563eb" />
-                </View>
-              )}
+              <Image source={MAYA_QR_IMAGE_SOURCE} style={styles.qrImage} resizeMode="contain" />
               <View style={styles.qrPaymentTextBlock}>
                 <Text style={styles.qrPaymentTitle}>{MAYA_QR_DISPLAY_NAME}</Text>
                 <Text style={styles.qrPaymentText}>Amount: {MANAGER_ACCESS_PRICE}</Text>
@@ -4137,14 +4132,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#ffffff",
     borderRadius: 8,
     height: 96,
-    width: 96
-  },
-  qrPlaceholder: {
-    alignItems: "center",
-    backgroundColor: "#eff6ff",
-    borderRadius: 8,
-    height: 96,
-    justifyContent: "center",
     width: 96
   },
   qrPaymentTextBlock: {

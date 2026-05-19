@@ -106,7 +106,7 @@ $env:EXPO_PUBLIC_API_URL="https://requisition-app-api.onrender.com"
 npx.cmd expo start --clear
 ```
 
-To show your Maya Business QR image inside Expo Go, also set this before starting Expo:
+The app bundles `assets/maya-qr.png` for the Request Access payment panel. To temporarily override it with a hosted image in Expo Go, set this before starting Expo:
 
 ```powershell
 $env:EXPO_PUBLIC_MAYA_QR_IMAGE_URL="https://your-public-image-url/maya-qr.png"
