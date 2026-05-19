@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  Linking,
+  Image,
   Modal,
   Platform,
   Pressable,
@@ -143,6 +143,9 @@ const EMPTY_PROJECT_FORM = {
 
 const MANAGER_EMAIL = "afhinzz.ailes@gmail.com";
 const OTP_API_URL = process.env.EXPO_PUBLIC_API_URL || "https://requisition-app-api.onrender.com";
+const MANAGER_ACCESS_PRICE = "3,500 Pesos";
+const MAYA_QR_IMAGE_URL = process.env.EXPO_PUBLIC_MAYA_QR_IMAGE_URL || "";
+const MAYA_QR_DISPLAY_NAME = process.env.EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME || "Maya Business QR";
 
 const INITIAL_ACCOUNTS = [
   {
@@ -185,7 +188,9 @@ const EMPTY_MANAGER_ACCESS_FORM = {
   fullName: "",
   email: "",
   company: "",
-  contactNumber: ""
+  contactNumber: "",
+  paymentSender: "",
+  paymentReference: ""
 };
 
 const EMPTY_MANAGER_PROFILE_FORM = {
@@ -329,7 +334,7 @@ export default function App() {
     if (isOtpRequesting) return "Sending code";
     if (isPasswordResetRequesting) return "Sending reset code";
     if (isPasswordResetSaving) return "Updating password";
-    if (isManagerAccessSending) return "Opening Maya Checkout";
+    if (isManagerAccessSending) return "Submitting payment review";
     if (isManagerProfileSaving) return "Saving Manager profile";
     if (isRefreshLoading) return "Refreshing workspace";
     if (isItemSaving) return editingItem ? "Saving request" : "Creating request";
@@ -1008,45 +1013,41 @@ export default function App() {
     const fullName = managerAccessForm.fullName.trim();
     const email = managerAccessForm.email.trim().toLowerCase();
     const contactNumber = managerAccessForm.contactNumber.trim();
+    const paymentSender = managerAccessForm.paymentSender.trim();
+    const paymentReference = managerAccessForm.paymentReference.trim();
 
-    if (!fullName || !email || !contactNumber) {
-      Alert.alert("Missing information", "Full name, email, and contact number are required.");
+    if (!fullName || !email || !contactNumber || !paymentSender || !paymentReference) {
+      Alert.alert("Missing information", "Full name, email, contact number, payment sender, and payment reference are required.");
       return;
     }
 
     setIsManagerAccessSending(true);
 
     try {
-      const response = await fetch(`${OTP_API_URL}/manager-access/checkout`, {
+      const response = await fetch(`${OTP_API_URL}/manager-access/qr-request`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fullName,
           email,
           company: managerAccessForm.company.trim(),
-          contactNumber
+          contactNumber,
+          paymentSender,
+          paymentReference
         })
       });
       const result = await response.json();
 
       if (!response.ok) {
-        Alert.alert("Checkout not opened", result.error || "The backend could not create the Maya Checkout session.");
+        Alert.alert("Request not submitted", result.error || "The backend could not submit the payment review.");
         return;
       }
 
       setManagerAccessForm(EMPTY_MANAGER_ACCESS_FORM);
       setIsManagerAccessOpen(false);
-      if (result.redirectUrl) {
-        try {
-          await Linking.openURL(result.redirectUrl);
-        } catch (openError) {
-          Alert.alert("Checkout created", `Open this Maya Checkout link:\n\n${result.redirectUrl}`);
-          return;
-        }
-      }
       Alert.alert(
-        "Maya Checkout opened",
-        "Complete the payment in Maya. After payment confirmation, temporary Manager login details will be emailed to you."
+        "Payment sent for review",
+        "The creator will verify your Maya QR payment. If approved, temporary Manager login details will be emailed to you."
       );
     } catch (error) {
       Alert.alert("Backend unavailable", `Start the backend, then try again.\n\n${OTP_API_URL}`);
@@ -1231,7 +1232,7 @@ export default function App() {
               ? "Only registered accounts can access the requisition workspace."
               : authMode === "signup"
                 ? signupForm.role === "Manager"
-                  ? "Manager access is paid through Maya Checkout."
+                  ? "Manager access is paid through Maya QR and verified by the creator."
                   : "Select a registered manager, then request a one-time code before signing up."
                 : "Request a one-time code from your registered email, then enter your new password."}
           </Text>
@@ -1397,8 +1398,8 @@ export default function App() {
               {signupForm.role === "Manager" ? (
                 <View style={styles.formStack}>
                   <Text style={styles.promptText}>
-                    Manager accounts require paid access. Use Request Access to pay through Maya Checkout and receive
-                    temporary login details after payment confirmation.
+                    Manager accounts require paid access. Pay through Maya QR, submit the payment reference, and wait
+                    for creator approval.
                   </Text>
                   <HoverPressable style={styles.primaryButton} onPress={openManagerAccessFromSignup}>
                     <Text style={styles.primaryButtonText}>Request Access</Text>
@@ -2465,9 +2466,22 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
 
           <ScrollView contentContainerStyle={styles.formStack} showsVerticalScrollIndicator={false}>
             <Text style={styles.promptText}>
-              This opens Maya Checkout for Manager access. After payment confirmation, temporary login details will be
-              sent to your email.
+              Pay {MANAGER_ACCESS_PRICE} through Maya QR, then submit the payment reference for creator review.
             </Text>
+            <View style={styles.qrPaymentPanel}>
+              {MAYA_QR_IMAGE_URL ? (
+                <Image source={{ uri: MAYA_QR_IMAGE_URL }} style={styles.qrImage} resizeMode="contain" />
+              ) : (
+                <View style={styles.qrPlaceholder}>
+                  <Feather name="grid" size={30} color="#2563eb" />
+                </View>
+              )}
+              <View style={styles.qrPaymentTextBlock}>
+                <Text style={styles.qrPaymentTitle}>{MAYA_QR_DISPLAY_NAME}</Text>
+                <Text style={styles.qrPaymentText}>Amount: {MANAGER_ACCESS_PRICE}</Text>
+                <Text style={styles.qrPaymentHint}>Use your Maya Business QR, then enter the payment details below.</Text>
+              </View>
+            </View>
             <TextInput
               placeholder="Full name (e.g. Juan Dela Cruz)"
               placeholderTextColor="#9ca3af"
@@ -2499,6 +2513,21 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
               value={form.contactNumber}
               onChangeText={(value) => onChange("contactNumber", value)}
             />
+            <TextInput
+              placeholder="Maya sender name (e.g. Juan Dela Cruz)"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.paymentSender}
+              onChangeText={(value) => onChange("paymentSender", value)}
+            />
+            <TextInput
+              autoCapitalize="characters"
+              placeholder="Maya payment reference number"
+              placeholderTextColor="#9ca3af"
+              style={styles.input}
+              value={form.paymentReference}
+              onChangeText={(value) => onChange("paymentReference", value)}
+            />
           </ScrollView>
 
           <HoverPressable
@@ -2506,7 +2535,7 @@ function ManagerAccessRequestModal({ visible, form, isSending, onChange, onClose
             onPress={onSubmit}
             disabled={isSending}
           >
-            <Text style={styles.primaryButtonText}>{isSending ? "Opening..." : "Pay with Maya"}</Text>
+            <Text style={styles.primaryButtonText}>{isSending ? "Submitting..." : "Submit Payment Review"}</Text>
             <Feather name="send" size={18} color="#ffffff" />
           </HoverPressable>
         </View>
@@ -4093,6 +4122,49 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     padding: 12
+  },
+  qrPaymentPanel: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderColor: "#dbeafe",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    padding: 12
+  },
+  qrImage: {
+    backgroundColor: "#ffffff",
+    borderRadius: 8,
+    height: 96,
+    width: 96
+  },
+  qrPlaceholder: {
+    alignItems: "center",
+    backgroundColor: "#eff6ff",
+    borderRadius: 8,
+    height: 96,
+    justifyContent: "center",
+    width: 96
+  },
+  qrPaymentTextBlock: {
+    flex: 1,
+    gap: 4
+  },
+  qrPaymentTitle: {
+    color: "#111827",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  qrPaymentText: {
+    color: "#2563eb",
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  qrPaymentHint: {
+    color: "#64748b",
+    fontSize: 13,
+    lineHeight: 18
   },
   dangerButton: {
     alignItems: "center",

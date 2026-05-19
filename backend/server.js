@@ -24,10 +24,7 @@ const managerAccessAmountPhp =
     ? configuredManagerAccessAmountPhp
     : 3500;
 const managerAccessPrice = `${managerAccessAmountPhp.toLocaleString("en-PH")} Pesos`;
-const mayaEnvironment = String(process.env.MAYA_ENV || "sandbox").toLowerCase() === "production" ? "production" : "sandbox";
-const mayaApiBaseUrl =
-  process.env.MAYA_API_BASE_URL || (mayaEnvironment === "production" ? "https://pg.maya.ph" : "https://pg-sandbox.paymaya.com");
-const mayaCheckoutTimeoutMs = Number(process.env.MAYA_CHECKOUT_TIMEOUT_MS || 20000);
+const creatorApprovalSecret = cleanText(process.env.CREATOR_APPROVAL_SECRET || process.env.MAIL_RELAY_SECRET);
 const passwordHashAlgorithm = "scrypt";
 const passwordKeyLength = 64;
 const passwordScryptOptions = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
@@ -469,15 +466,13 @@ app.post("/manager-access/request", async (req, res) => {
   }
 });
 
-app.post("/manager-access/checkout", async (req, res) => {
+app.post("/manager-access/qr-request", async (req, res) => {
   const request = readManagerAccessBody(req.body);
 
-  if (!request.fullName || !request.email || !request.contactNumber) {
-    return res.status(400).json({ error: "Full name, email, and contact number are required." });
-  }
-
-  if (!process.env.MAYA_PUBLIC_KEY) {
-    return res.status(500).json({ error: "MAYA_PUBLIC_KEY is not configured on the backend." });
+  if (!request.fullName || !request.email || !request.contactNumber || !request.paymentSender || !request.paymentReference) {
+    return res.status(400).json({
+      error: "Full name, email, contact number, payment sender, and payment reference are required."
+    });
   }
 
   if (!getEmailProvider()) {
@@ -485,117 +480,103 @@ app.post("/manager-access/checkout", async (req, res) => {
   }
 
   const accessRequestId = generateManagerAccessRequestId();
-  const requestReferenceNumber = generateMayaReferenceNumber();
+  const requestReferenceNumber = generateManualPaymentReferenceNumber();
 
   await createManagerAccessRequest({
     ...request,
     id: accessRequestId,
     amountPhp: managerAccessAmountPhp,
-    status: "pending_payment",
+    status: "pending_manual_review",
     requestReferenceNumber
   });
 
   try {
-    const checkout = await createMayaCheckout({
+    await sendManualManagerAccessReviewEmails({
       request,
       requestReferenceNumber,
-      requestBaseUrl: getRequestBaseUrl(req)
-    });
-
-    await markManagerAccessCheckoutCreated({
-      requestReferenceNumber,
-      checkoutId: checkout.checkoutId || checkout.paymentId || checkout.id || "",
-      redirectUrl: checkout.redirectUrl || ""
+      approvalUrl: getManagerAccessApprovalUrl(req, requestReferenceNumber)
     });
 
     return res.status(201).json({
       ok: true,
-      redirectUrl: checkout.redirectUrl,
-      checkoutId: checkout.checkoutId || checkout.paymentId || checkout.id || "",
       requestReferenceNumber,
-      amount: managerAccessPrice,
-      environment: mayaEnvironment
+      amount: managerAccessPrice
     });
   } catch (error) {
-    console.error("Failed to create Maya checkout:", {
+    console.error("Failed to submit manual Manager access request:", {
+      provider: error?.provider,
       status: error?.status,
       code: error?.code,
-      message: error?.message,
-      responseText: error?.responseText
+      command: error?.command,
+      responseCode: error?.responseCode,
+      message: error?.message
     });
-    await updateManagerAccessStatus(requestReferenceNumber, "checkout_failed");
-    return res.status(502).json({ error: getMayaErrorMessage(error) });
+    await updateManagerAccessStatus(requestReferenceNumber, "review_email_failed");
+    return res.status(502).json({ error: getMailErrorMessage(error) });
   }
 });
 
-app.post("/maya/webhook", async (req, res) => {
-  const event = req.body || {};
-  const paymentStatus = getMayaWebhookStatus(event);
-  const requestReferenceNumber = cleanText(event.requestReferenceNumber || event.request_reference_number);
-  const checkoutId = cleanText(event.checkoutId || event.paymentId || event.id);
+app.get("/manager-access/approve/:reference", async (req, res) => {
+  const requestReferenceNumber = cleanText(req.params.reference);
+  const token = cleanText(req.query.token);
 
-  if (!requestReferenceNumber && !checkoutId) {
-    return res.json({ ok: true });
+  if (!isValidCreatorApprovalToken(token)) {
+    return res.status(403).type("html").send(
+      renderPaymentResultPage({
+        heading: "Approval Blocked",
+        message: "The approval link is missing or invalid. Check CREATOR_APPROVAL_SECRET on the backend.",
+        reference: requestReferenceNumber
+      })
+    );
   }
 
-  const accessRequest = requestReferenceNumber
-    ? await getManagerAccessRequestByReference(requestReferenceNumber)
-    : await getManagerAccessRequestByCheckoutId(checkoutId);
+  const accessRequest = await getManagerAccessRequestByReference(requestReferenceNumber);
 
   if (!accessRequest) {
-    return res.json({ ok: true });
+    return res.status(404).type("html").send(
+      renderPaymentResultPage({
+        heading: "Request Not Found",
+        message: "No Manager access request was found for this reference.",
+        reference: requestReferenceNumber
+      })
+    );
   }
 
-  if (checkoutId && !accessRequest.checkoutId) {
-    await markManagerAccessCheckoutCreated({
-      requestReferenceNumber: accessRequest.requestReferenceNumber,
-      checkoutId,
-      redirectUrl: accessRequest.redirectUrl
+  if (accessRequest.status === "credentials_sent") {
+    return res.type("html").send(
+      renderPaymentResultPage({
+        heading: "Already Approved",
+        message: "Temporary Manager credentials were already sent to the requester.",
+        reference: requestReferenceNumber
+      })
+    );
+  }
+
+  try {
+    await updateManagerAccessStatus(requestReferenceNumber, "approved");
+    await fulfillPaidManagerAccess(accessRequest);
+    return res.type("html").send(
+      renderPaymentResultPage({
+        heading: "Manager Access Approved",
+        message: "Temporary Manager credentials were generated and emailed to the requester.",
+        reference: requestReferenceNumber
+      })
+    );
+  } catch (error) {
+    console.error("Failed to approve manual Manager access:", {
+      provider: error?.provider,
+      status: error?.status,
+      code: error?.code,
+      message: error?.message
     });
+    return res.status(502).type("html").send(
+      renderPaymentResultPage({
+        heading: "Approval Failed",
+        message: "The payment was marked approved, but credentials could not be sent. Check backend email logs.",
+        reference: requestReferenceNumber
+      })
+    );
   }
-
-  if (["PAYMENT_SUCCESS", "CAPTURED", "CHECKOUT_SUCCESS"].includes(paymentStatus)) {
-    try {
-      await fulfillPaidManagerAccess(accessRequest);
-      return res.json({ ok: true });
-    } catch (error) {
-      console.error("Failed to fulfill paid Manager access:", {
-        provider: error?.provider,
-        status: error?.status,
-        code: error?.code,
-        message: error?.message
-      });
-      return res.status(502).json({ error: "Payment was received, but temporary credentials could not be sent yet." });
-    }
-  }
-
-  if (["PAYMENT_FAILED", "PAYMENT_EXPIRED", "PAYMENT_CANCELLED", "CHECKOUT_FAILURE", "CHECKOUT_DROPOUT"].includes(paymentStatus)) {
-    await updateManagerAccessStatus(accessRequest.requestReferenceNumber, paymentStatus.toLowerCase());
-  }
-
-  return res.json({ ok: true });
-});
-
-app.get("/manager-access/payment/:result", async (req, res) => {
-  const result = cleanText(req.params.result).toLowerCase();
-  const reference = cleanText(req.query.ref);
-  const heading =
-    result === "success"
-      ? "Payment Submitted"
-      : result === "cancel"
-        ? "Payment Cancelled"
-        : "Payment Not Completed";
-  const message =
-    result === "success"
-      ? "Maya is confirming your payment. Once the payment webhook is received, the temporary Manager login will be sent to your email."
-      : result === "cancel"
-        ? "You cancelled the Maya Checkout session. You can return to the app and request access again."
-        : "Maya did not complete the payment. You can return to the app and request access again.";
-
-  res
-    .status(200)
-    .type("html")
-    .send(renderPaymentResultPage({ heading, message, reference }));
 });
 
 app.post("/accounts", async (req, res) => {
@@ -869,11 +850,11 @@ async function initializeDatabase() {
         email TEXT NOT NULL,
         company TEXT NOT NULL DEFAULT '',
         contact_number TEXT NOT NULL,
+        payment_sender TEXT NOT NULL DEFAULT '',
+        payment_reference TEXT NOT NULL DEFAULT '',
         amount_php NUMERIC(10,2) NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending_payment',
+        status TEXT NOT NULL DEFAULT 'pending_manual_review',
         request_reference_number TEXT NOT NULL UNIQUE,
-        checkout_id TEXT NOT NULL DEFAULT '',
-        redirect_url TEXT NOT NULL DEFAULT '',
         temporary_username TEXT NOT NULL DEFAULT '',
         temporary_password_sent_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -883,6 +864,8 @@ async function initializeDatabase() {
 
     await pgPool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS company TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS must_change_credentials BOOLEAN NOT NULL DEFAULT false");
+    await pgPool.query("ALTER TABLE manager_access_requests ADD COLUMN IF NOT EXISTS payment_sender TEXT NOT NULL DEFAULT ''");
+    await pgPool.query("ALTER TABLE manager_access_requests ADD COLUMN IF NOT EXISTS payment_reference TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS charge_to TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS procurement_status TEXT NOT NULL DEFAULT ''");
     await pgPool.query("ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS delivery_confirmation TEXT NOT NULL DEFAULT ''");
@@ -895,7 +878,6 @@ async function initializeDatabase() {
     await pgPool.query("CREATE INDEX IF NOT EXISTS requisitions_project_id_idx ON requisitions(project_id)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_username_idx ON project_members(username)");
     await pgPool.query("CREATE INDEX IF NOT EXISTS project_members_manager_idx ON project_members(manager_username)");
-    await pgPool.query("CREATE INDEX IF NOT EXISTS manager_access_requests_checkout_idx ON manager_access_requests(checkout_id)");
   } else {
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
@@ -976,11 +958,11 @@ async function initializeDatabase() {
         email TEXT NOT NULL,
         company TEXT NOT NULL DEFAULT '',
         contactNumber TEXT NOT NULL,
+        paymentSender TEXT NOT NULL DEFAULT '',
+        paymentReference TEXT NOT NULL DEFAULT '',
         amountPhp REAL NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending_payment',
+        status TEXT NOT NULL DEFAULT 'pending_manual_review',
         requestReferenceNumber TEXT NOT NULL UNIQUE,
-        checkoutId TEXT NOT NULL DEFAULT '',
-        redirectUrl TEXT NOT NULL DEFAULT '',
         temporaryUsername TEXT NOT NULL DEFAULT '',
         temporaryPasswordSentAt TEXT,
         createdAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -990,6 +972,8 @@ async function initializeDatabase() {
 
     addSqliteColumnIfMissing("accounts", "company", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("accounts", "mustChangeCredentials", "INTEGER NOT NULL DEFAULT 0");
+    addSqliteColumnIfMissing("manager_access_requests", "paymentSender", "TEXT NOT NULL DEFAULT ''");
+    addSqliteColumnIfMissing("manager_access_requests", "paymentReference", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "chargeTo", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "procurementStatus", "TEXT NOT NULL DEFAULT ''");
     addSqliteColumnIfMissing("requisitions", "deliveryConfirmation", "TEXT NOT NULL DEFAULT ''");
@@ -1001,7 +985,6 @@ async function initializeDatabase() {
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS requisitionsProjectIdIndex ON requisitions(projectId);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersUsernameIndex ON project_members(username);");
     sqliteDb.exec("CREATE INDEX IF NOT EXISTS projectMembersManagerIndex ON project_members(managerUsername);");
-    sqliteDb.exec("CREATE INDEX IF NOT EXISTS managerAccessRequestsCheckoutIndex ON manager_access_requests(checkoutId);");
   }
 
   await seedAccounts();
@@ -1795,14 +1778,17 @@ async function createManagerAccessRequest(request) {
   if (usePostgres) {
     await pgPool.query(
       `INSERT INTO manager_access_requests (
-        id, full_name, email, company, contact_number, amount_php, status, request_reference_number
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        id, full_name, email, company, contact_number, payment_sender, payment_reference,
+        amount_php, status, request_reference_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         request.id,
         request.fullName,
         request.email,
         request.company,
         request.contactNumber,
+        request.paymentSender,
+        request.paymentReference,
         request.amountPhp,
         request.status,
         request.requestReferenceNumber
@@ -1814,8 +1800,9 @@ async function createManagerAccessRequest(request) {
   sqliteDb
     .prepare(
       `INSERT INTO manager_access_requests (
-        id, fullName, email, company, contactNumber, amountPhp, status, requestReferenceNumber
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        id, fullName, email, company, contactNumber, paymentSender, paymentReference,
+        amountPhp, status, requestReferenceNumber
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       request.id,
@@ -1823,30 +1810,12 @@ async function createManagerAccessRequest(request) {
       request.email,
       request.company,
       request.contactNumber,
+      request.paymentSender,
+      request.paymentReference,
       request.amountPhp,
       request.status,
       request.requestReferenceNumber
     );
-}
-
-async function markManagerAccessCheckoutCreated({ requestReferenceNumber, checkoutId, redirectUrl }) {
-  if (usePostgres) {
-    await pgPool.query(
-      `UPDATE manager_access_requests
-       SET checkout_id = $1, redirect_url = $2, updated_at = NOW()
-       WHERE request_reference_number = $3`,
-      [checkoutId, redirectUrl, requestReferenceNumber]
-    );
-    return;
-  }
-
-  sqliteDb
-    .prepare(
-      `UPDATE manager_access_requests
-       SET checkoutId = ?, redirectUrl = ?, updatedAt = CURRENT_TIMESTAMP
-       WHERE requestReferenceNumber = ?`
-    )
-    .run(checkoutId, redirectUrl, requestReferenceNumber);
 }
 
 async function updateManagerAccessStatus(requestReferenceNumber, status) {
@@ -1917,16 +1886,6 @@ async function getManagerAccessRequestByReference(requestReferenceNumber) {
   return row ? mapManagerAccessRequest(row) : null;
 }
 
-async function getManagerAccessRequestByCheckoutId(checkoutId) {
-  if (usePostgres) {
-    const result = await pgPool.query("SELECT * FROM manager_access_requests WHERE checkout_id = $1", [checkoutId]);
-    return result.rows[0] ? mapManagerAccessRequest(result.rows[0]) : null;
-  }
-
-  const row = sqliteDb.prepare("SELECT * FROM manager_access_requests WHERE checkoutId = ?").get(checkoutId);
-  return row ? mapManagerAccessRequest(row) : null;
-}
-
 async function fulfillPaidManagerAccess(accessRequest) {
   const latestRequest = await getManagerAccessRequestByReference(accessRequest.requestReferenceNumber);
 
@@ -1985,99 +1944,6 @@ async function fulfillPaidManagerAccess(accessRequest) {
     temporaryPassword
   });
   await markManagerAccessCredentialsSent(latestRequest.requestReferenceNumber);
-}
-
-async function createMayaCheckout({ request, requestReferenceNumber, requestBaseUrl }) {
-  const amountText = managerAccessAmountPhp.toFixed(2);
-  const nameParts = splitFullName(request.fullName);
-  const encodedReference = encodeURIComponent(requestReferenceNumber);
-  const checkoutPayload = {
-    totalAmount: {
-      value: amountText,
-      currency: "PHP"
-    },
-    buyer: {
-      firstName: nameParts.firstName,
-      middleName: nameParts.middleName,
-      lastName: nameParts.lastName,
-      contact: {
-        phone: request.contactNumber,
-        email: request.email
-      }
-    },
-    items: [
-      {
-        name: "Requisition App Manager Access",
-        code: "MANAGER_ACCESS",
-        description: "Paid Manager access for the requisition app",
-        quantity: "1",
-        amount: {
-          value: amountText
-        },
-        totalAmount: {
-          value: amountText
-        }
-      }
-    ],
-    redirectUrl: {
-      success: `${requestBaseUrl}/manager-access/payment/success?ref=${encodedReference}`,
-      failure: `${requestBaseUrl}/manager-access/payment/failure?ref=${encodedReference}`,
-      cancel: `${requestBaseUrl}/manager-access/payment/cancel?ref=${encodedReference}`
-    },
-    requestReferenceNumber,
-    metadata: {
-      product: "manager_access",
-      email: request.email,
-      company: request.company || ""
-    }
-  };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), mayaCheckoutTimeoutMs);
-
-  try {
-    const response = await fetch(`${mayaApiBaseUrl}/checkout/v1/checkouts`, {
-      method: "POST",
-      headers: {
-        Authorization: getMayaAuthHeader(process.env.MAYA_PUBLIC_KEY),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(checkoutPayload),
-      signal: controller.signal
-    });
-    const bodyText = await response.text();
-    let responseBody = null;
-
-    try {
-      responseBody = bodyText ? JSON.parse(bodyText) : null;
-    } catch (parseError) {
-      responseBody = null;
-    }
-
-    if (!response.ok) {
-      const error = new Error(`Maya Checkout request failed with status ${response.status}. ${bodyText}`);
-      error.status = response.status;
-      error.responseText = bodyText;
-      throw error;
-    }
-
-    if (!responseBody?.redirectUrl) {
-      const error = new Error("Maya did not return a checkout redirect URL.");
-      error.responseText = bodyText;
-      throw error;
-    }
-
-    return responseBody;
-  } catch (error) {
-    if (error.name === "AbortError") {
-      const timeoutError = new Error("Maya Checkout request timed out.");
-      timeoutError.code = "ETIMEDOUT";
-      throw timeoutError;
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 function hashPassword(password) {
@@ -2638,6 +2504,49 @@ async function sendAppEmail({ to, subject, messageText }) {
   throw new Error("No email provider is configured.");
 }
 
+async function sendManualManagerAccessReviewEmails({ request, requestReferenceNumber, approvalUrl }) {
+  const approvalLine = approvalUrl
+    ? `Approve and send temporary Manager credentials: ${approvalUrl}`
+    : "Approval link unavailable. Set CREATOR_APPROVAL_SECRET on the backend to enable one-click approval.";
+
+  await sendAppEmail({
+    to: creatorEmail,
+    subject: "Manager access QR payment review",
+    messageText: [
+      "A user submitted a Maya QR payment for Manager access.",
+      "",
+      `Full name: ${request.fullName}`,
+      `Email: ${request.email}`,
+      `Company: ${request.company || "Not provided"}`,
+      `Contact number: ${request.contactNumber}`,
+      `Payment sender: ${request.paymentSender}`,
+      `Maya payment reference: ${request.paymentReference}`,
+      `Manager access price: ${managerAccessPrice}`,
+      `App review reference: ${requestReferenceNumber}`,
+      "",
+      "Verify the payment in the Maya Business app before approving.",
+      approvalLine
+    ].join("\n")
+  });
+
+  await sendAppEmail({
+    to: request.email,
+    subject: "Requisition App Manager access payment review",
+    messageText: [
+      `Hello ${request.fullName},`,
+      "",
+      "Your Maya QR payment details were submitted for Manager access review.",
+      `Manager access price: ${managerAccessPrice}`,
+      `Maya payment reference: ${request.paymentReference}`,
+      `Review reference: ${requestReferenceNumber}`,
+      "",
+      "The creator will verify the payment in the Maya Business app. If approved, temporary Manager login details will be sent to this email.",
+      "",
+      "Thank you."
+    ].join("\n")
+  });
+}
+
 async function sendTemporaryManagerCredentialsEmail({ request, temporaryUsername, temporaryPassword }) {
   await sendAppEmail({
     to: request.email,
@@ -2668,6 +2577,8 @@ async function sendTemporaryManagerCredentialsEmail({ request, temporaryUsername
         `Email: ${request.email}`,
         `Company: ${request.company || "Not provided"}`,
         `Contact number: ${request.contactNumber}`,
+        `Payment sender: ${request.paymentSender || "Not recorded"}`,
+        `Maya payment reference: ${request.paymentReference || "Not recorded"}`,
         `Reference: ${request.requestReferenceNumber}`,
         `Temporary username: ${temporaryUsername}`
       ].join("\n")
@@ -2687,7 +2598,9 @@ function readManagerAccessBody(body) {
     fullName: cleanText(body.fullName),
     email: normalizeEmail(body.email),
     company: cleanText(body.company),
-    contactNumber: cleanText(body.contactNumber)
+    contactNumber: cleanText(body.contactNumber),
+    paymentSender: cleanText(body.paymentSender),
+    paymentReference: cleanText(body.paymentReference)
   };
 }
 
@@ -2698,24 +2611,16 @@ function mapManagerAccessRequest(request) {
     email: request.email,
     company: request.company || "",
     contactNumber: request.contactNumber || request.contact_number,
+    paymentSender: request.paymentSender || request.payment_sender || "",
+    paymentReference: request.paymentReference || request.payment_reference || "",
     amountPhp: Number(request.amountPhp || request.amount_php || 0),
     status: request.status,
     requestReferenceNumber: request.requestReferenceNumber || request.request_reference_number,
-    checkoutId: request.checkoutId || request.checkout_id || "",
-    redirectUrl: request.redirectUrl || request.redirect_url || "",
     temporaryUsername: request.temporaryUsername || request.temporary_username || "",
     temporaryPasswordSentAt: request.temporaryPasswordSentAt || request.temporary_password_sent_at || "",
     createdAt: request.createdAt || request.created_at || "",
     updatedAt: request.updatedAt || request.updated_at || ""
   };
-}
-
-function getMayaAuthHeader(apiKey) {
-  return `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`;
-}
-
-function getMayaWebhookStatus(event) {
-  return cleanText(event.paymentStatus || event.status || event.name || event.eventType || event.event).toUpperCase();
 }
 
 function getRequestBaseUrl(req) {
@@ -2725,28 +2630,33 @@ function getRequestBaseUrl(req) {
   );
 }
 
-function getMayaErrorMessage(error) {
-  if (error?.code === "ETIMEDOUT") {
-    return "Maya Checkout did not respond in time. Try again in a moment.";
-  }
-
-  if (error?.status === 401 || error?.status === 403) {
-    return "Maya rejected the API key. Check MAYA_PUBLIC_KEY and MAYA_ENV on the backend.";
-  }
-
-  if (error?.status === 400) {
-    return "Maya rejected the checkout details. Check the Maya request fields and API key environment.";
-  }
-
-  return "The backend could not create the Maya Checkout session.";
-}
-
 function generateManagerAccessRequestId() {
   return `MAR-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
-function generateMayaReferenceNumber() {
-  return `MA-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`.slice(0, 36);
+function generateManualPaymentReferenceNumber() {
+  return `QR-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`.slice(0, 36);
+}
+
+function getManagerAccessApprovalUrl(req, requestReferenceNumber) {
+  if (!creatorApprovalSecret) {
+    return "";
+  }
+
+  return `${getRequestBaseUrl(req)}/manager-access/approve/${encodeURIComponent(requestReferenceNumber)}?token=${encodeURIComponent(creatorApprovalSecret)}`;
+}
+
+function isValidCreatorApprovalToken(token) {
+  const expected = cleanText(creatorApprovalSecret);
+  const provided = cleanText(token);
+
+  if (!expected || !provided) {
+    return false;
+  }
+
+  const expectedHash = crypto.createHash("sha256").update(expected).digest();
+  const providedHash = crypto.createHash("sha256").update(provided).digest();
+  return expectedHash.length === providedHash.length && crypto.timingSafeEqual(expectedHash, providedHash);
 }
 
 async function generateUniqueTemporaryManagerUsername(fullName) {

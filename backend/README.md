@@ -41,16 +41,15 @@ Local development uses SQLite automatically. Render deployment uses PostgreSQL w
    SMTP_SECURE=true
    ```
 
-4. Add Maya Checkout values for paid Manager access:
+4. Add paid Manager access values:
 
    ```text
    MANAGER_ACCESS_AMOUNT_PHP=3500
-   MAYA_ENV=sandbox
-   MAYA_PUBLIC_KEY=pk-your-maya-public-key
+   CREATOR_APPROVAL_SECRET=use-a-long-random-secret-here
    PUBLIC_API_URL=https://requisition-app-api.onrender.com
    ```
 
-   Use `MAYA_ENV=production` with your production Maya public key only after sandbox testing is approved.
+   `CREATOR_APPROVAL_SECRET` protects the email approval link that generates temporary Manager credentials after you manually verify the Maya QR payment.
 
 5. Start the backend:
 
@@ -94,8 +93,7 @@ After creating the Blueprint on Render, add these service environment variables 
 MAIL_RELAY_URL=https://script.google.com/macros/s/your-deployment-id/exec
 MAIL_RELAY_SECRET=use-a-long-random-secret-here
 MANAGER_ACCESS_AMOUNT_PHP=3500
-MAYA_ENV=sandbox
-MAYA_PUBLIC_KEY=pk-your-maya-public-key
+CREATOR_APPROVAL_SECRET=use-a-long-random-secret-here
 PUBLIC_API_URL=https://requisition-app-api.onrender.com
 ```
 
@@ -108,12 +106,20 @@ $env:EXPO_PUBLIC_API_URL="https://requisition-app-api.onrender.com"
 npx.cmd expo start --clear
 ```
 
-## Maya Checkout Webhook
+To show your Maya Business QR image inside Expo Go, also set this before starting Expo:
 
-In Maya Business Manager, point the Checkout payment webhook to:
-
-```text
-https://requisition-app-api.onrender.com/maya/webhook
+```powershell
+$env:EXPO_PUBLIC_MAYA_QR_IMAGE_URL="https://your-public-image-url/maya-qr.png"
+$env:EXPO_PUBLIC_MAYA_QR_DISPLAY_NAME="Your Maya Business Name"
+npx.cmd expo start --clear
 ```
 
-The app creates the checkout using the public key, redirects the user to Maya, and waits for Maya's webhook before generating temporary Manager credentials.
+## Manual Maya QR Approval
+
+The Manager access flow uses manual QR payment review:
+
+1. User scans or uses your Maya Business QR and pays `MANAGER_ACCESS_AMOUNT_PHP`.
+2. User submits their Maya sender name and payment reference in the app.
+3. Backend emails the creator with the payment details and approval link.
+4. Creator verifies the transaction in the Maya Business app.
+5. Creator clicks the approval link, and the backend generates temporary Manager credentials and emails the requester.
